@@ -1,4 +1,5 @@
 def filterEnum(enum, additionalInfo=None):
   if enum.spelling == "":
     return False
-  return True
+  return not enum.is_anonymous()
+  # return True

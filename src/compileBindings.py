@@ -1,60 +1,101 @@
 #!/usr/bin/python3
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 from Common import ocIncludePaths, additionalIncludePaths
-import subprocess
-import multiprocessing
-from functools import partial
+from plumbum import local
 
 from argparse import ArgumentParser
 
-libraryBasePath = "/opencascade.js/build/bindings"
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.console import Console
 
-def buildOneFile(args, item):
-  if not os.path.exists(item + ".o"):
-    print("building " + item)
-    command = [
-      "emcc",
-      "-flto",
-      "-fexceptions",
-      "-sDISABLE_EXCEPTION_CATCHING=0",
-      "-DIGNORE_NO_ATOMICS=1",
-      "-DOCCT_NO_PLUGINS",
-      "-frtti",
-      "-DHAVE_RAPIDJSON",
-      "-Os",
-      # "-g3",
-      # "-gsource-map",
-      # "--source-map-base=http://localhost:8080",
-      "-pthread" if args["threading"] == "multi-threaded" else "",
-      *list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths)),
-      "-c", item,
-    ]
-    subprocess.check_call([
-      *command,
-      "-o", item + ".o",
-    ])
-  else:
-    print("file " + item + ".o already exists, skipping")
+LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
 
-def compileCustomCodeBindings(args):
-  filesToBuild = []
-  for dirpath, dirnames, filenames in os.walk(libraryBasePath + "/myMain.h"):
-    filesToBuild.extend(map(lambda x: dirpath + "/" + x, filter(lambda x: x.endswith(".cpp"), filenames)))
+console = Console()
 
-  with multiprocessing.Pool(processes=int(multiprocessing.cpu_count() / 1)) as p:
-    p.map(partial(buildOneFile, args), sorted(filesToBuild))
+def buildOneFile(args, item, debug=False):
+    if not os.path.exists(f"{item}.o"):
+        try:
+            emcc = local["ccache"]["emcc"][
+                debug and "" or "-flto",
+                "-fexceptions",
+                "-sDISABLE_EXCEPTION_CATCHING=0",
+                "-DIGNORE_NO_ATOMICS=1",
+                "-DOCCT_NO_PLUGINS",
+                "-frtti",
+                "-DHAVE_RAPIDJSON",
+                "-DHAVE_TBB",
+                "-DHAVE_DRACO",
+                "-Wno-deprecated-declarations",
+                "-Wno-delete-abstract-non-virtual-dtor",
+                debug and "-O0" or "-O3",
+                args["threading"] == "multi-threaded" and "-pthread" or "",
+                *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
+                "-c",
+                item,
+                "-o",
+                f"{item}.o",
+            ]
+
+            console.print(f"building {item}")
+            result = emcc()
+            return (item, result)
+        except Exception as e:
+            # console.print_exception()
+            console.print(f"failed to build {item}")
+            return (item, None)
+    else:
+        console.print(f"file {item}.o already exists, skipping")
+        return (item, None)
+
+
+def compileCustomCodeBindings(args, file="myMain.h"):
+    filesToBuild = []
+    for dirpath, _, filenames in os.walk(f"{LIBRARY_BASE_PATH}/{file}"):
+        filesToBuild.extend(
+            map(
+                lambda x: f"{dirpath}/{x}",
+                filter(
+                    lambda x: x.endswith(".cpp")
+                    and not os.path.exists(f"{dirpath}/{x}.o"),
+                    filenames,
+                ),
+            )
+        )
+
+    console.print(f"Building {len(filesToBuild)} files")
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Compiling", total=len(filesToBuild))
+        with ProcessPoolExecutor() as executor:
+            futures = [executor.submit(buildOneFile, args, item) for item in sorted(filesToBuild)]
+            for future in as_completed(futures):
+                item, result = future.result()
+                if result is not None:
+                    progress.update(task_id, description=f"Building {item}", advance=1)
+                else:
+                    progress.update(task_id, description=f"Skipped or Failed {item}", advance=1)
+
 
 if __name__ == "__main__":
-  parser = ArgumentParser()
-  parser.add_argument(dest="threading", choices=["single-threaded", "multi-threaded"], help="Build in single vs. multi-threaded mode")
-  args = parser.parse_args()
+    parser = ArgumentParser()
+    parser.add_argument(
+        dest="threading",
+        choices=["single-threaded", "multi-threaded"],
+        help="Build in single vs. multi-threaded mode",
+        nargs="*",
+        default="single-threaded",
+    )
+    args = parser.parse_args()
 
-  filesToBuild = []
-  for dirpath, dirnames, filenames in os.walk(libraryBasePath):
-    filesToBuild.extend(map(lambda x: dirpath + "/" + x, filter(lambda x: x.endswith(".cpp"), filenames)))
+    compileArgs = {"threading": args.threading}
 
-  with multiprocessing.Pool(processes=int(multiprocessing.cpu_count() / 1)) as p:
-    p.map(partial(buildOneFile, {
-      "threading": args.threading,
-    }), sorted(filesToBuild))
+    compileCustomCodeBindings(compileArgs, "")
