@@ -7,7 +7,7 @@ from plumbum import local
 
 from argparse import ArgumentParser
 
-from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
 from rich.console import Console
 
 LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
@@ -42,7 +42,7 @@ def buildOneFile(args, item, debug=False):
             result = emcc()
             return (item, result)
         except Exception as e:
-            # console.print_exception()
+            console.print_exception(max_frames=0)
             console.print(f"failed to build {item}")
             return (item, None)
     else:
@@ -70,6 +70,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        MofNCompleteColumn(),
         TimeElapsedColumn(),
         TimeRemainingColumn(),
         console=console,

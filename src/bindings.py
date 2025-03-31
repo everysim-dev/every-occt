@@ -309,6 +309,11 @@ class EmbindBindings(Bindings):
         templateArgs=None,
         className=None,
     ):
+        # TheKeyType
+        # TheItemType
+        # Iterator
+        # LocOpe_SequenceOfLin
+
         def f(arg):
             argChildren = list(arg.get_children())
             argBinding = ""
@@ -384,6 +389,7 @@ class EmbindBindings(Bindings):
                     type.kind == clang.cindex.TypeKind.LVALUEREFERENCE
                     and (
                         type.get_pointee().get_canonical().spelling in builtInTypes
+                        or not type.get_pointee().is_const_qualified()
                         or type.get_pointee().kind == clang.cindex.TypeKind.ENUM
                         or type.get_pointee().kind == clang.cindex.TypeKind.POINTER
                         or (
@@ -404,6 +410,13 @@ class EmbindBindings(Bindings):
             args = list(method.get_arguments())
             argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg.type), args))
             returnNeedsWrapper = needsWrapper(method.result_type)
+
+            isOutputStreamInvolved = returnNeedsWrapper and method.result_type.get_canonical().spelling == "std::ostream" or any(arg.type.get_canonical().spelling == "std::ostream" for arg in args)
+
+            if isOutputStreamInvolved:
+                print(f"Skipping method {className}::{method.spelling} due to Standard_OStream parameter or return type.")
+                return
+
             if any(argsNeedingWrapper) or returnNeedsWrapper:
 
                 def replaceTemplateArgs(x):
