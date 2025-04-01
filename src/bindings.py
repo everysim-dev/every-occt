@@ -256,11 +256,7 @@ class EmbindBindings(Bindings):
         )
         if nonPublicDestructor or placementDelete:
             output += (
-                "namespace emscripten { namespace internal { template<> void raw_destructor<"
-                + theClass.spelling
-                + ">("
-                + theClass.spelling
-                + "* ptr) { /* do nothing */ } } }\n"
+                f"namespace emscripten {{ namespace internal {{ template<> void raw_destructor<{theClass.spelling}>({theClass.spelling}* ptr) {{ /* do nothing */ }} }} }}\n"
             )
         return output
 
@@ -385,37 +381,58 @@ class EmbindBindings(Bindings):
             [overloadPostfix, numOverloads] = getMethodOverloadPostfix(theClass, method)
 
             def needsWrapper(type):
-                return (
-                    type.kind == clang.cindex.TypeKind.LVALUEREFERENCE
-                    and (
-                        type.get_pointee().get_canonical().spelling in builtInTypes
-                        or not type.get_pointee().is_const_qualified()
-                        or type.get_pointee().kind == clang.cindex.TypeKind.ENUM
-                        or type.get_pointee().kind == clang.cindex.TypeKind.POINTER
-                        or (
-                            theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE
-                            and type.get_pointee().spelling in templateArgs
-                            and templateArgs[type.get_pointee().spelling]
-                            .get_canonical()
-                            .spelling
-                            in builtInTypes
-                        )
+                # 래핑이 필요하지 않은 타입 리스트
+                skip_wrapping_types = [
+                    "Standard_OStream",
+                    "Standard_SStream",
+                ]
+                
+                # LValueReference이고 특정 타입을 가리키는 경우 래핑 불필요
+                if type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
+                    pointee = type.get_pointee()
+                    pointee_canonical = pointee.get_canonical()
+                    
+                    # 특정 타입이 포함된 LValueReference인 경우
+                    if any(t in pointee.spelling for t in skip_wrapping_types):
+                        return False
+                    
+                    # builtInTypes에 없고, enum이나 포인터가 아닌 LValueReference인 경우
+                    if (pointee_canonical.spelling not in builtInTypes 
+                        and pointee.kind != clang.cindex.TypeKind.ENUM
+                        and pointee.kind != clang.cindex.TypeKind.POINTER):
+                        return False
+                    
+                    # const-qualified된 LValueReference인 경우
+                    if pointee.is_const_qualified():
+                        return False
+                    
+                    # const 메서드에서의 LValueReference인 경우
+                    if method.is_const_method():
+                        return False
+                    
+                    # 래핑이 필요한 LValueReference 케이스
+                    is_builtin = pointee_canonical.spelling in builtInTypes
+                    is_enum = pointee.kind == clang.cindex.TypeKind.ENUM
+                    is_pointer = pointee.kind == clang.cindex.TypeKind.POINTER
+                    is_non_const = not pointee.is_const_qualified()
+                    
+                    is_template_arg_builtin = (
+                        theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE
+                        and pointee.spelling in templateArgs
+                        and templateArgs[pointee.spelling].get_canonical().spelling in builtInTypes
                     )
-                    or (
-                        type.get_canonical().kind == clang.cindex.TypeKind.POINTER
-                        and isCString(type)
-                    )
-                )
+                    
+                    return is_builtin or is_non_const or is_enum or is_pointer or is_template_arg_builtin
+                
+                # C 문자열 포인터인 경우
+                if type.get_canonical().kind == clang.cindex.TypeKind.POINTER and isCString(type):
+                    return True
+                
+                return False
 
             args = list(method.get_arguments())
             argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg.type), args))
             returnNeedsWrapper = needsWrapper(method.result_type)
-
-            isOutputStreamInvolved = returnNeedsWrapper and method.result_type.get_canonical().spelling == "std::ostream" or any(arg.type.get_canonical().spelling == "std::ostream" for arg in args)
-
-            if isOutputStreamInvolved:
-                print(f"Skipping method {className}::{method.spelling} due to Standard_OStream parameter or return type.")
-                return
 
             if any(argsNeedingWrapper) or returnNeedsWrapper:
 
