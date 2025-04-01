@@ -35,6 +35,7 @@ ENV _EMCC_CCACHE=1
 ENV COMPILER_WRAPPER=ccache
 ENV CCACHE_DIR=/opencascade.js/build/ccache
 ENV EM_CACHE=/opencascade.js/build/cache
+ENV CCACHE_MAXSIZE=25G
 
 WORKDIR /rapidjson
 RUN \
