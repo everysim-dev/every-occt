@@ -108,8 +108,8 @@ def processChildBatch(
                     typedefGenerator(tu),
                     templateTypedefGenerator(tu),
                 )
-                bindingsFile = open(filename, "w")
-                bindingsFile.write(output)
+                with open(filename, "w") as bindingsFile:
+                    bindingsFile.write(output)
             except SkipException as e:
                 print(str(e))
         else:
