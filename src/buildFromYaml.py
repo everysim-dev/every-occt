@@ -10,6 +10,7 @@ from cerberus import Validator
 from argparse import ArgumentParser
 from Common import ocIncludePaths, additionalIncludePaths
 from plumbum import local
+from Common import buildOptions
 
 parser = ArgumentParser()
 parser.add_argument(dest="filename", help="Custom build input file (.yml)", metavar="FILE.yml")
@@ -78,14 +79,7 @@ def runBuild(build):
       f.close()
       print(f"building {additionalBindCodeFileName}")
       emcc = local["emcc"][
-        "-flto",
-        "-fexceptions",
-        "-sDISABLE_EXCEPTION_CATCHING=0",
-        "-DIGNORE_NO_ATOMICS=1",
-        "-DOCCT_NO_PLUGINS",
-        "-frtti",
-        "-DHAVE_RAPIDJSON",
-        "-Os",
+        *buildOptions,
         "-pthread" if os.environ["threading"] == "multi-threaded" else "",
         *list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths)),
         "-c", additionalBindCodeFileName,

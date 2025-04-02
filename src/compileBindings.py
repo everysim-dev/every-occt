@@ -6,6 +6,7 @@ from Common import ocIncludePaths, additionalIncludePaths
 from plumbum import local
 
 from argparse import ArgumentParser
+from Common import buildOptions
 
 from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
 from rich.console import Console
@@ -18,24 +19,11 @@ def buildOneFile(args, item, debug=False):
     if not os.path.exists(f"{item}.o"):
         try:
             emcc = local["ccache"]["emcc"][
-                debug and "" or "-flto",
-                "-fexceptions",
-                "-sDISABLE_EXCEPTION_CATCHING=0",
-                "-DIGNORE_NO_ATOMICS=1",
-                "-DOCCT_NO_PLUGINS",
-                "-frtti",
-                "-DHAVE_RAPIDJSON",
-                "-DHAVE_TBB",
-                "-DHAVE_DRACO",
-                "-Wno-deprecated-declarations",
-                "-Wno-delete-abstract-non-virtual-dtor",
-                debug and "-O0" or "-O3",
+                *buildOptions,
                 args["threading"] == "multi-threaded" and "-pthread" or "",
                 *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
-                "-c",
-                item,
-                "-o",
-                f"{item}.o",
+                "-c", item,
+                "-o", f"{item}.o",
             ]
 
             console.print(f"building {item}")

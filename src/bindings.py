@@ -116,6 +116,15 @@ cStringTypes = [
     "char *const",
 ]
 
+special_template_types = [
+    "NCollection_LocalArray",
+    "NCollection_Sequence", 
+    "NCollection_List",
+    "NCollection_Vector",
+    "NCollection_Array1",
+    "NCollection_Array2",
+    "TColStd_Array1OfReal"
+]
 
 def isCString(type):
     return type.get_canonical().spelling in cStringTypes
@@ -125,11 +134,46 @@ def getClassTypeName(theClass, templateDecl=None):
     return templateDecl.spelling if templateDecl is not None else theClass.spelling
 
 
+def get_canonical_spelling(type_obj: clang.cindex.Type) -> str:
+    """Gets the canonical spelling, handling potential pointer/reference layers."""
+    # Go to the base type if it's a pointer or reference before getting canonical
+    base_type = type_obj
+    if base_type.kind == clang.cindex.TypeKind.POINTER:
+        base_type = base_type.get_pointee()
+    elif base_type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
+         base_type = base_type.get_pointee()
+    elif base_type.kind == clang.cindex.TypeKind.RVALUEREFERENCE:
+         base_type = base_type.get_pointee()
+
+    # Return canonical spelling of the potentially pointed-to/referenced type
+    # If the original type was a pointer/ref, the canonical spelling might still include it.
+    # Often, we want the canonical name of the *underlying* class/struct/enum.
+    # Let's try getting canonical directly first, as it often handles scope correctly.
+    canonical_str = type_obj.get_canonical().spelling
+
+    # Basic sanity check/fallback for extremely problematic cases (rare)
+    if not canonical_str or "anonymous" in canonical_str:
+         # Fallback to non-canonical if canonical fails badly
+         # You might want more sophisticated handling here
+         print(f"WARN: Canonical spelling problematic ('{canonical_str}') for type '{type_obj.spelling}'. Falling back.")
+         return type_obj.spelling
+
+    # Remove leading/trailing whitespace which can sometimes appear
+    return canonical_str.strip()
+
 class Bindings:
     def __init__(self, typedefs, templateTypedefs, translationUnit):
         self.templateTypedefs = templateTypedefs
         self.translationUnit = translationUnit
         self.typedefs = typedefs
+
+    def get_canonical_spelling(self, type_obj: clang.cindex.Type) -> str:
+        # Same logic as the standalone function above
+        canonical_str = type_obj.get_canonical().spelling
+        if not canonical_str or "anonymous" in canonical_str:
+             print(f"WARN: Canonical spelling problematic ('{canonical_str}') for type '{type_obj.spelling}'. Falling back.")
+             return type_obj.spelling
+        return canonical_str.strip()
 
     def getTypedefedTemplateTypeAsString(
         self, theTypeSpelling, templateDecl=None, templateArgs=None
@@ -177,7 +221,27 @@ class Bindings:
 
     def processClass(self, theClass, templateDecl=None, templateArgs=None):
         output = ""
+        className = getClassTypeName(theClass, templateDecl)
+        if className == "":
+             # Use canonical name as a fallback for the class itself
+             className = self.get_canonical_spelling(theClass.type)
+             # className = theClass.type.spelling # Original fallback
         isAbstract = isAbstractClass(theClass, self.translationUnit)
+
+        baseSpec = list(
+            filter(
+                lambda x: x.kind == clang.cindex.CursorKind.CXX_BASE_SPECIFIER
+                and x.access_specifier == clang.cindex.AccessSpecifier.PUBLIC,
+                theClass.get_children(),
+            )
+        )
+
+        if len(baseSpec) > 0:
+            # *** Use canonical spelling for the base class type ***
+            base_class_canonical_spelling = self.get_canonical_spelling(baseSpec[0].type)
+            baseClassBinding = ", base<" + base_class_canonical_spelling + ">"
+        else:
+            baseClassBinding = ""
         if not isAbstract:
             output += self.processSimpleConstructor(theClass)
         for method in theClass.get_children():
@@ -199,10 +263,181 @@ class Bindings:
                 print(str(e))
         return output
 
+class TemplateTypeDetector:
+    """OpenCascade 템플릿 기반 타입 감지 및 처리 클래스"""
+    
+    def __init__(self, translation_unit):
+        self.translation_unit = translation_unit
+        self.type_cache = {}  # 중복 검색 방지를 위한 캐시
+    
+    def detect_template_type(self, class_name):
+        """클래스 이름을 기반으로 템플릿 패턴을 감지하고 관련 정보를 반환"""
+        # 캐시 확인
+        if class_name in self.type_cache:
+            return self.type_cache[class_name]
+        
+        result = {
+            'is_template_type': False,
+            'template_pattern': None,
+            'base_type_name': None,
+            'value_type': None,
+            'item_type': None,
+            'collection_type': None
+        }
+
+        if "opencascade::handle" in class_name:
+            self.type_cache[class_name] = result
+            return result
+        
+        # 패턴 감지
+        if "HArray1Of" in class_name:
+            result['is_template_type'] = True
+            result['template_pattern'] = 'HArray1'
+            result['base_type_name'] = class_name.replace("HArray1Of", "Array1Of")
+        elif "HArray2Of" in class_name:
+            result['is_template_type'] = True
+            result['template_pattern'] = 'HArray2'
+            result['base_type_name'] = class_name.replace("HArray2Of", "Array2Of")
+        elif "HSequenceOf" in class_name:
+            result['is_template_type'] = True
+            result['template_pattern'] = 'HSequence'
+            result['base_type_name'] = class_name.replace("HSequenceOf", "SequenceOf")
+        # NCollection 기반 다른 컬렉션 타입들
+        elif any(pattern in class_name for pattern in ["HListOf", "HMapOf", "HSetOf"]):
+            for pattern, replacement in [
+                ("HListOf", "ListOf"), 
+                ("HMapOf", "MapOf"), 
+                ("HSetOf", "SetOf")
+            ]:
+                if pattern in class_name:
+                    result['is_template_type'] = True
+                    result['template_pattern'] = pattern.replace("Of", "")
+                    result['base_type_name'] = class_name.replace(pattern, replacement)
+                    break
+        elif '<' in class_name and '>' in class_name:
+            base_part = class_name.split('<')[0].strip()
+            args_part = class_name.split('<')[1].split('>')[0].strip()
+            
+            # 특수 템플릿 타입인지 확인
+            if any(base_part.endswith(special_type) for special_type in special_template_types):
+                result['is_template_type'] = True
+                result['base_type_name'] = base_part
+                result['value_type'] = args_part
+        
+        # 템플릿 타입이 아닌 경우 여기서 종료
+        if not result['is_template_type']:
+            self.type_cache[class_name] = result
+            return result
+
+        if result['base_type_name']:
+            result['base_type_name'] = result['base_type_name'].replace("const", "").strip()
+        
+        # 기본 타입 찾기 (Array1, Array2, Sequence 등)
+        print(f"DEBUG: 템플릿 기본 타입 '{result['base_type_name']}' 검색 중...")
+        base_type_cursor = self._find_base_type_cursor(result['base_type_name'])
+        
+        if base_type_cursor:
+            print(f"DEBUG: 기본 타입 커서 발견: {base_type_cursor.kind}")
+            # 컬렉션 타입 결정 (NCollection_Array1, NCollection_Array2 등)
+            underlying_type = None
+            if base_type_cursor.kind == clang.cindex.CursorKind.TYPEDEF_DECL:
+                underlying_type = base_type_cursor.underlying_typedef_type
+                result['collection_type'] = underlying_type.spelling
+                print(f"DEBUG: 컬렉션 타입: {result['collection_type']}")
+            
+            # 값 타입 결정 (템플릿 인자)
+            if underlying_type and underlying_type.get_num_template_arguments() > 0:
+                result['value_type'] = underlying_type.get_template_argument_type(0)
+                print(f"DEBUG: value_type: {result['value_type'].spelling}")
+                
+                # 항목 타입이 있는 경우 (예: NCollection_Array2의 두 번째 템플릿 인자)
+                if underlying_type.get_num_template_arguments() > 1:
+                    result['item_type'] = underlying_type.get_template_argument_type(1)
+                    print(f"DEBUG: item_type: {result['item_type'].spelling}")
+        else:
+            print(f"WARNING: 기본 타입 '{result['base_type_name']}'을 찾을 수 없습니다.")
+            result['is_template_type'] = False
+        
+        # 결과 캐싱 및 반환
+        self.type_cache[class_name] = result
+        return result
+    
+    def _find_base_type_cursor(self, type_name):
+        """주어진 타입 이름에 대한 커서 찾기"""
+        for node in self.translation_unit.cursor.walk_preorder():
+            if node.spelling == type_name:
+                if node.kind in [
+                    clang.cindex.CursorKind.CLASS_DECL, 
+                    clang.cindex.CursorKind.STRUCT_DECL,
+                    clang.cindex.CursorKind.TYPEDEF_DECL
+                ]:
+                    return node
+        return None
+    
+    def get_constructor_params_info(self, template_info, constructor_args):
+        """생성자 매개변수 정보 처리"""
+        params_info = []
+        
+        if not template_info['is_template_type']:
+            return params_info
+        
+        pattern = template_info['template_pattern']
+        value_type = template_info['value_type']
+        
+        # 패턴별 생성자 매개변수 처리
+        if pattern == 'HArray1':
+            # HArray1 패턴 처리: (lower, upper, [value_type])
+            if len(constructor_args) == 3 and value_type:
+                params_info.append({
+                    'index': 2,
+                    'expected_type': value_type,
+                    'description': 'defaultValue'
+                })
+        
+        elif pattern == 'HArray2':
+            # HArray2 패턴 처리: (rowLow, rowUpp, colLow, colUpp, [value_type])
+            if len(constructor_args) == 5 and value_type:
+                params_info.append({
+                    'index': 4,
+                    'expected_type': value_type,
+                    'description': 'defaultValue'
+                })
+        
+        elif pattern == 'HSequence':
+            # HSequence 패턴 처리
+            if len(constructor_args) > 0 and value_type:
+                # 인자 개수에 따라 다른 생성자일 수 있음
+                if len(constructor_args) == 1:
+                    # 가능한 복사 생성자 혹은 초기 크기 생성자
+                    arg_type = constructor_args[0].type.spelling
+                    if "int" in arg_type.lower() or "integer" in arg_type.lower():
+                        # 초기 크기 생성자 - 일반적으로 처리 필요 없음
+                        pass
+                    else:
+                        # 복사 생성자일 가능성 - 타입 확인 필요
+                        params_info.append({
+                            'index': 0,
+                            'expected_type': value_type,
+                            'description': 'copyValue'
+                        })
+        
+        # 다른 패턴에 대한 처리도 추가 가능
+        
+        return params_info
+    
+    def get_correct_type_for_param(self, param_info):
+        """매개변수에 대한 올바른 타입 문자열 반환"""
+        if not param_info or not param_info['expected_type']:
+            return None
+        
+        # 간단한 경우: const Type&
+        return f"const {param_info['expected_type'].spelling} &"
+
 
 class EmbindBindings(Bindings):
     def __init__(self, typedefs, templateTypedefs, translationUnit):
         super().__init__(typedefs, templateTypedefs, translationUnit)
+        self.template_detector = TemplateTypeDetector(translationUnit)
 
     def processClass(self, theClass, templateDecl=None, templateArgs=None):
         output = ""
@@ -305,11 +540,6 @@ class EmbindBindings(Bindings):
         templateArgs=None,
         className=None,
     ):
-        # TheKeyType
-        # TheItemType
-        # Iterator
-        # LocOpe_SequenceOfLin
-
         def f(arg):
             argChildren = list(arg.get_children())
             argBinding = ""
@@ -339,6 +569,13 @@ class EmbindBindings(Bindings):
                 typename = self.getTypedefedTemplateTypeAsString(
                     arg.type.spelling, templateDecl, templateArgs
                 )
+
+                if '<' in typename and '>' in typename:
+                    template_info = self.template_detector.detect_template_type(typename)
+                    if template_info['is_template_type']:
+                        print(f"DEBUG: 템플릿 타입 처리: {typename}")
+                        changed = True
+
                 if arg.type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
                     tokenList = list(arg.get_tokens())
                     isConstRef = len(tokenList) > 0 and tokenList[0].spelling == "const"
@@ -390,7 +627,12 @@ class EmbindBindings(Bindings):
                 # LValueReference이고 특정 타입을 가리키는 경우 래핑 불필요
                 if type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
                     pointee = type.get_pointee()
+                    pointee_spelling = pointee.spelling
                     pointee_canonical = pointee.get_canonical()
+
+                    template_info = self.template_detector.detect_template_type(pointee_spelling)
+                    if template_info['is_template_type']:
+                        return True
                     
                     # 특정 타입이 포함된 LValueReference인 경우
                     if any(t in pointee.spelling for t in skip_wrapping_types):
@@ -401,13 +643,12 @@ class EmbindBindings(Bindings):
                         and pointee.kind != clang.cindex.TypeKind.ENUM
                         and pointee.kind != clang.cindex.TypeKind.POINTER):
                         return False
+
+                    if pointee.kind == clang.cindex.TypeKind.ENUM:
+                        return True
                     
                     # const-qualified된 LValueReference인 경우
                     if pointee.is_const_qualified():
-                        return False
-                    
-                    # const 메서드에서의 LValueReference인 경우
-                    if method.is_const_method():
                         return False
                     
                     # 래핑이 필요한 LValueReference 케이스
@@ -435,8 +676,14 @@ class EmbindBindings(Bindings):
             returnNeedsWrapper = needsWrapper(method.result_type)
 
             if any(argsNeedingWrapper) or returnNeedsWrapper:
-
                 def replaceTemplateArgs(x):
+                    type_spelling = args[x[0]].type.spelling
+                    
+                    if '<' in type_spelling and '>' in type_spelling:
+                        base_type = type_spelling.split('<')[0].strip()
+                        if base_type in special_template_types:
+                            return type_spelling
+                    
                     if (
                         templateArgs is not None
                         and args[x[0]].type.get_pointee().spelling.replace("const ", "")
@@ -463,6 +710,13 @@ class EmbindBindings(Bindings):
                     )
 
                 def getArgTypeName(type):
+                    type_spelling = type.get_pointee().spelling
+                    
+                    if '<' in type_spelling and '>' in type_spelling:
+                        base_type = type_spelling.split('<')[0].strip()
+                        if base_type in special_template_types:
+                            return type_spelling
+                    
                     if (
                         templateArgs is not None
                         and type.get_pointee().spelling.replace("const ", "")
@@ -521,19 +775,26 @@ class EmbindBindings(Bindings):
 
                 def generateInvocationArgs(x):
                     if x[1]:
+                        arg_type = args[x[0]].type
+                        pointee_type = arg_type.get_pointee() if arg_type.kind == clang.cindex.TypeKind.LVALUEREFERENCE else None
+        
+                        if pointee_type:
+                            template_info = self.template_detector.detect_template_type(pointee_type.spelling)
+                            if template_info['is_template_type']:
+                                return f"ref_{getArgName(x)}"
+
                         if not isCString(args[x[0]].type):
                             return f"ref_{getArgName(x)}"
+                        elif (
+                            not args[x[0]]
+                            .type.get_canonical()
+                            .get_pointee()
+                            .is_const_qualified()
+                            or args[x[0]].type.is_const_qualified()
+                        ):
+                            return f"{getArgName(x)}.isNull() ? nullptr : strdup({getArgName(x)}.as<std::string>().c_str())"
                         else:
-                            if (
-                                not args[x[0]]
-                                .type.get_canonical()
-                                .get_pointee()
-                                .is_const_qualified()
-                                or args[x[0]].type.is_const_qualified()
-                            ):
-                                return f"{getArgName(x)}.isNull() ? nullptr : strdup({getArgName(x)}.as<std::string>().c_str())"
-                            else:
-                                return f"{getArgName(x)}.isNull() ? nullptr : {getArgName(x)}.as<std::string>().c_str()"
+                            return f"{getArgName(x)}.isNull() ? nullptr : {getArgName(x)}.as<std::string>().c_str()"
                     else:
                         return getArgName(x)
 
@@ -722,6 +983,8 @@ class EmbindBindings(Bindings):
         output = ""
         if children is None:
             children = list(theClass.get_children())
+        
+        # 모든 public 생성자 가져오기
         constructors = list(
             filter(
                 lambda x: x.kind == clang.cindex.CursorKind.CONSTRUCTOR
@@ -729,68 +992,96 @@ class EmbindBindings(Bindings):
                 children,
             )
         )
-        if len(constructors) == 1:
-            return output
+
+        # 오버로딩할 생성자가 1개 이하면 처리 중단 (이미 processSimpleConstructor에서 처리했거나 오버로딩 불필요)
+        if len(constructors) <= 1:
+             return output
+
         constructorBindings = ""
-        allOverloads = [
-            m
-            for m in children
-            if m.kind == clang.cindex.CursorKind.CONSTRUCTOR
-            and m.access_specifier == clang.cindex.AccessSpecifier.PUBLIC
-        ]
-        if len(allOverloads) == 1:
-            raise Exception("Something weird happened")
-        for constructor in filter(
-            lambda x: filterMethodOrProperty(theClass, x), constructors
-        ):
-            overloadPostfix = (
-                ""
-                if (not len(allOverloads) > 1)
-                else "_" + str(allOverloads.index(constructor) + 1)
-            )
+        allOverloads = constructors # 모든 public 생성자 리스트
 
-            args = ", ".join(
-                list(
-                    map(
-                        lambda x: (
-                            ("std::string " + x.spelling)
-                            if isCString(x.type)
-                            else self.getSingleArgumentBinding(
-                                True, True, templateDecl, templateArgs
-                            )(x)[0]
-                        ),
-                        constructor.get_arguments(),
-                    )
-                )
-            )
-            argNames = ", ".join(
-                list(
-                    map(
-                        lambda x: (
-                            (x.spelling + ".c_str()")
-                            if isCString(x.type)
-                            else x.spelling
-                        ),
-                        constructor.get_arguments(),
-                    )
-                )
-            )
-            argTypes = ", ".join(
-                list(
-                    map(
-                        lambda x: (
-                            "std::string"
-                            if isCString(x.type)
-                            else self.getSingleArgumentBinding(
-                                False, True, templateDecl, templateArgs
-                            )(x)[0]
-                        ),
-                        constructor.get_arguments(),
-                    )
-                )
-            )
+        # 바인딩 가능한 생성자 필터링 (filterMethodOrProperty 적용)
+        valid_constructors_for_binding = list(filter(lambda x: filterMethodOrProperty(theClass, x), allOverloads))
 
-            name = getClassTypeName(theClass, templateDecl)
+        # 바인딩 가능한 생성자가 1개 이하이고, 그 중 인자 없는 생성자가 있다면 오버로딩 불필요
+        if len(valid_constructors_for_binding) <= 1 and any(len(list(c.get_arguments())) == 0 for c in valid_constructors_for_binding):
+             return output
+        
+         # 템플릿 타입 감지
+        class_name = getClassTypeName(theClass, templateDecl)
+        template_info = self.template_detector.detect_template_type(class_name)
+        
+        # 생성자 인덱스 매핑 (일관된 이름 부여용)
+        constructor_indices = {con: idx for idx, con in enumerate(allOverloads)}
+
+        name = getClassTypeName(theClass, templateDecl)
+
+        # 바인딩 가능한 생성자들에 대해 루프 실행
+        for constructor in valid_constructors_for_binding:
+            overload_index = constructor_indices.get(constructor, -1)
+            if overload_index == -1: continue # 혹시 모를 오류 방지
+
+            overloadPostfix = "_" + str(overload_index + 1)
+
+            processed_args_for_struct_def = []
+            processed_arg_types_for_embind = []
+            processed_arg_names_for_init = []
+
+            constructor_args = list(constructor.get_arguments())
+
+            param_info_list = []
+            if template_info['is_template_type']:
+                param_info_list = self.template_detector.get_constructor_params_info(
+                    template_info, constructor_args
+                )
+                # print(f"DEBUG: 특수 처리 필요 매개변수: {len(param_info_list)}개")
+
+             # 매개변수 정보 인덱스별 사전 생성
+            param_info_map = {info['index']: info for info in param_info_list}
+            
+            # 각 생성자 인자에 대해 처리
+            for x_idx, x in enumerate(constructor_args):
+                # 기본 타입 바인딩 정보 얻기
+                type_binding_info = self.getSingleArgumentBinding(
+                    argNames=False,
+                    isConstructor=True,
+                    templateDecl=templateDecl,
+                    templateArgs=templateArgs,
+                    className=class_name
+                )(x)
+                
+                resolved_type_str = type_binding_info[0]
+                arg_name = x.spelling if x.spelling else f'arg{x_idx}'
+                
+                # 템플릿 특수 처리가 필요한 경우 타입 오버라이드
+                final_type_for_binding = resolved_type_str
+                if x_idx in param_info_map:
+                     override_type = self.template_detector.get_correct_type_for_param(param_info_map[x_idx])
+                     if override_type:
+                         # HArray/HSequence의 초기값 생성자인지 확인
+                         if param_info_map[x_idx]['description'] == 'defaultValue':
+                             # 여기서 ElementType으로 타입을 강제 지정
+                             final_type_for_binding = f"const {template_info['value_type'].spelling} &" 
+                             print(f"DEBUG: Constructor init value type override: {final_type_for_binding}")
+                         else:
+                              final_type_for_binding = override_type
+                
+                # 배열 참조 처리
+                if "(&)" in final_type_for_binding and "[" in final_type_for_binding:
+                    final_type_for_struct_def = final_type_for_binding.replace("(&)", f"(&{arg_name})")
+                    processed_args_for_struct_def.append(final_type_for_struct_def)
+                else:
+                    processed_args_for_struct_def.append(f"{final_type_for_binding} {arg_name}")
+                
+                processed_arg_types_for_embind.append(final_type_for_binding)
+                processed_arg_names_for_init.append(arg_name)
+
+            # 리스트를 문자열로 조합
+            args = ", ".join(processed_args_for_struct_def)
+            argTypes = ", ".join(processed_arg_types_for_embind)
+            argNames = ", ".join(processed_arg_names_for_init)
+
+            # 헬퍼 구조체 및 Embind 클래스 바인딩 코드 생성
             constructorBindings += (
                 "    struct " + name + overloadPostfix + " : public " + name + " {\n"
             )
@@ -868,11 +1159,7 @@ class TypescriptBindings(Bindings):
         if len(baseSpec) > 0:
             if any(x in baseSpec[0].type.spelling for x in [":", "<"]):
                 print(
-                    'Unsupported character for base class "'
-                    + baseSpec[0].type.spelling
-                    + '" ('
-                    + theClass.spelling
-                    + ")"
+                    f'Unsupported character for base class "{baseSpec[0].type.spelling}" ({theClass.spelling})'
                 )
             else:
                 baseClassDefinition = " extends " + baseSpec[0].type.spelling

@@ -6,6 +6,7 @@ import multiprocessing
 from filter.filterSourceFiles import filterSourceFile
 from filter.filterPackages import filterPackages
 from plumbum import local
+from Common import buildOptions
 
 from argparse import ArgumentParser
 
@@ -51,15 +52,7 @@ def buildObjectFiles(file, args):
   mkdirp(f"{LIBRARY_BASE_PATH}/{os.path.dirname(relativeFile)}")
 
   emcc = local['ccache']["emcc"][
-    "-flto",
-    "-fexceptions",
-    "-sDISABLE_EXCEPTION_CATCHING=0",
-    "-DIGNORE_NO_ATOMICS=1",
-    "-DOCCT_NO_PLUGINS",
-    "-frtti",
-    "-DHAVE_RAPIDJSON", 
-    "-Os",
-    "-Wno-deprecated-declarations",
+    *buildOptions,
     # "-g3",
     # "-gsource-map",
     # "--source-map-base=http://localhost:8080",
