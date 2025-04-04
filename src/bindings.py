@@ -389,11 +389,26 @@ class EmbindBindings(Bindings):
         super().__init__(typedefs, templateTypedefs, translationUnit)
         self.template_detector = TemplateTypeDetector(translationUnit)
 
+    def is_non_copyable_class(self, cursor):
+        """클래스가 복사 불가능한지 확인합니다 (private 복사 생성자)"""
+        for method in cursor.get_children():
+            if (method.kind == clang.cindex.CursorKind.CONSTRUCTOR and 
+                method.access_specifier == clang.cindex.AccessSpecifier.PRIVATE):
+                # 복사 생성자인지 확인
+                args = list(method.get_arguments())
+                if (len(args) == 1 and 
+                    args[0].type.get_canonical().spelling.find(cursor.spelling) != -1 and
+                    "const" in args[0].type.spelling):
+                    return True
+        return False
+
     def processClass(self, theClass, templateDecl=None, templateArgs=None):
         output = ""
         className = getClassTypeName(theClass, templateDecl)
         if className == "":
             className = theClass.type.spelling
+
+        is_non_copyable = self.is_non_copyable_class(theClass)
 
         baseSpec = list(
             filter(
@@ -413,13 +428,39 @@ class EmbindBindings(Bindings):
             + (theClass.spelling if templateDecl is None else templateDecl.spelling)
             + ") {\n"
         )
-        output += (
-            "  class_<" + className + baseClassBinding + '>("' + className + '")\n'
-        )
+
+        if is_non_copyable:
+            output += (
+                "  // 복사 불가능한 클래스에 대한 특수 바인딩\n"
+                + "  class_<" + className + baseClassBinding + '>("' + className + '")\n'
+                + "    // 복사 생성자 대신 참조로 처리\n"
+                + "    .allow_subclass<internal::EmvalBindingType<" + className + "*>>()\n"
+            )
+        else:
+            output += (
+                "  class_<" + className + baseClassBinding + '>("' + className + '")\n'
+            )
 
         output += super().processClass(theClass, templateDecl, templateArgs)
 
         output += "}\n\n"
+
+        if is_non_copyable:
+            output += (
+                "// 복사 불가능한 클래스에 대한 헬퍼 함수\n"
+                + f"namespace emscripten {{ \n"
+                + f"  namespace internal {{ \n"
+                + f"    // 복사 불가능한 클래스의 소멸자 처리\n"
+                + f"    template<> void raw_destructor<{className}>({className}* ptr) {{ /* 수동 삭제 방지 */ }} \n"
+                + f"    // 값 대신 포인터로 처리하는 바인딩 타입\n"
+                + f"    template<> struct BindingType<{className}> : public BindingType<{className}*> {{\n"
+                + f"      static WireType toWireType(const {className}& value) {{\n"
+                + f"        return BindingType<{className}*>::toWireType(const_cast<{className}*>(&value), true);\n"
+                + f"      }}\n"
+                + f"    }};\n"
+                + f"  }}\n"
+                + f"}}\n\n"
+            )
 
         # Epilog
         nonPublicDestructor = any(
@@ -579,45 +620,11 @@ class EmbindBindings(Bindings):
                 
                 pointee = type.get_pointee()
                 pointee_canonical = pointee.get_canonical()
-                
+
                 # 상수 참조는 래핑 필요 없음 - 데이터 수정 불가
                 if pointee.is_const_qualified():
                     return False
-                
-                # 열거형 참조 확인 - 열거형은 래핑 필요
-                is_enum = False
-                try:
-                    # 직접적인 열거형 확인
-                    is_enum = (pointee.kind == clang.cindex.TypeKind.ENUM)
-                    
-                    # 타입 이름이 아닌 타입 구조 자체 분석
-                    if not is_enum:
-                        # 때로는 열거형이 ELABORATED로 나올 수 있음
-                        if pointee.kind == clang.cindex.TypeKind.ELABORATED:
-                            underlying_type = pointee.get_named_type()
-                            is_enum = (underlying_type and underlying_type.kind == clang.cindex.TypeKind.ENUM)
-                        
-                        # 정규화된 타입 확인
-                        if not is_enum and pointee_canonical.kind == clang.cindex.TypeKind.ENUM:
-                            is_enum = True
-                            
-                        # 타입 선언 확인을 통한 열거형 감지
-                        if not is_enum:
-                            for cursor in pointee.get_declaration().get_children():
-                                if cursor.kind == clang.cindex.CursorKind.ENUM_CONSTANT_DECL:
-                                    is_enum = True
-                                    break
-                except:
-                    # 타입 분석 도중 발생할 수 있는 예외 처리
-                    pass
 
-                if is_enum:
-                    return True
-                
-                # 스트림 타입은 래핑 불필요
-                if any(term in pointee.spelling.lower() for term in ["stream", "ostream", "istream", "fstream", "ssteam"]):
-                    return False
-                
                 # 기본 타입(int, float 등)은 래핑 필요
                 # 이는 값 변경이 포인터를 통해 전달되어야 하기 때문
                 if pointee_canonical.spelling in builtInTypes:
@@ -627,16 +634,27 @@ class EmbindBindings(Bindings):
                 if pointee.kind == clang.cindex.TypeKind.POINTER:
                     return True
                 
-                # 템플릿 타입에 대한 특별 처리
-                try:
-                    # 템플릿 타입인지 확인
-                    if '<' in pointee.spelling and '>' in pointee.spelling:
-                        # 특수 템플릿 타입 목록에 있는 경우만 래핑
-                        for special_template in special_template_types:
-                            if special_template in pointee.spelling:
-                                return True
-                except:
-                    pass
+                
+                if pointee.kind == clang.cindex.TypeKind.ENUM:
+                    return True
+
+                # 때로는 열거형이 ELABORATED로 나올 수 있음
+                if pointee.kind == clang.cindex.TypeKind.ELABORATED:
+                    underlying_type = pointee.get_named_type()
+                    return underlying_type and underlying_type.kind == clang.cindex.TypeKind.ENUM
+                
+                # 정규화된 타입 확인
+                if pointee_canonical.kind == clang.cindex.TypeKind.ENUM:
+                    return True
+                    
+                # 타입 선언 확인을 통한 열거형 감지
+                for cursor in pointee.get_declaration().get_children():
+                    if cursor.kind == clang.cindex.CursorKind.ENUM_CONSTANT_DECL:
+                        return True
+                
+                # 스트림 타입은 래핑 불필요
+                if any(term in pointee.spelling.lower() for term in ["stream", "ostream", "istream", "fstream", "ssteam"]):
+                    return False
 
                 is_user_defined_type = (
                     pointee.kind in [
@@ -647,26 +665,20 @@ class EmbindBindings(Bindings):
                 )
 
                 if is_user_defined_type:
-                    # 템플릿 타입 분석
-                    try:
-                        template_info = self.template_detector.detect_template_type(pointee_canonical.spelling)
-                        is_template = template_info and template_info['is_template_type']
-                        
-                        # 템플릿 인자 확인
-                        is_template_arg = (
-                            theClass and 
-                            theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE and
-                            templateArgs and 
-                            pointee_canonical.spelling in templateArgs
-                        )
-                        
-                        # 템플릿 관련 타입은 래핑 필요
-                        if is_template or is_template_arg:
-                            return True
-                            
-                        return False
-                    except:
-                        pass
+                    template_info = self.template_detector.detect_template_type(pointee_canonical.spelling)
+                    is_template = template_info and template_info['is_template_type']
+                    
+                    # 템플릿 인자 확인
+                    is_template_arg = (
+                        theClass and 
+                        theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE and
+                        templateArgs and 
+                        pointee_canonical.spelling in templateArgs
+                    )
+                    
+                    # 템플릿 관련 타입은 래핑 필요
+                    if is_template or is_template_arg:
+                        return True
                 
                 # 이외의 모든 타입은 기본적으로 래핑하지 않음
                 return False
@@ -778,6 +790,11 @@ class EmbindBindings(Bindings):
                         arg_type = args[x[0]].type
                         pointee_type = arg_type.get_pointee() if arg_type.kind == clang.cindex.TypeKind.LVALUEREFERENCE else None
         
+                        if (pointee_type and
+                            pointee_type.get_canonical().spelling in builtInTypes and
+                            not pointee_type.is_const_qualified()):
+                            return f"ref_{getArgName(x)}"
+
                         if pointee_type:
                             template_info = self.template_detector.detect_template_type(pointee_type.spelling)
                             if template_info['is_template_type']:
