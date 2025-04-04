@@ -470,11 +470,12 @@ class EmbindBindings(Bindings):
         standardConstructor = publicConstructors[0]
         if not standardConstructor:
             return output
-
+        
         argTypesBindings = ", ".join(
             list(
                 map(
-                    lambda x: x.type.get_canonical().spelling, list(standardConstructor.get_arguments())
+                    lambda x: self.getTypedefedTemplateTypeAsString(x.type.spelling), 
+                    list(standardConstructor.get_arguments())
                 )
             )
         )
@@ -567,110 +568,108 @@ class EmbindBindings(Bindings):
         ):
             [overloadPostfix, numOverloads] = getMethodOverloadPostfix(theClass, method)
 
-            def needsWrapper(type, theClass=None, templateArgs=None):
-                # C 문자열 포인터인 경우
+            def needsWrapper(type: clang.cindex.Type):
+                # C 문자열 포인터는 항상 래핑 필요
                 if type.get_canonical().kind == clang.cindex.TypeKind.POINTER and isCString(type):
                     return True
-                    
-                # LValueReference 분석
+
+                # LValueReference가 아니면 래핑 필요 없음
                 if type.kind != clang.cindex.TypeKind.LVALUEREFERENCE:
                     return False
                 
                 pointee = type.get_pointee()
                 pointee_canonical = pointee.get_canonical()
                 
-                # 1. 비상수(non-const) 참조 여부 확인 - 이는 항상 래핑 필요
-                is_non_const = not pointee.is_const_qualified()
+                # 상수 참조는 래핑 필요 없음 - 데이터 수정 불가
+                if pointee.is_const_qualified():
+                    return False
                 
-                # 2. 기본 내장 타입인지 확인
-                is_builtin = pointee_canonical.spelling in builtInTypes
-                
-                # 3. 열거형(enum) 타입인지 확인
-                is_enum = pointee.kind == clang.cindex.TypeKind.ENUM
-                
-                # 4. 포인터 타입인지 확인
-                is_pointer = pointee.kind == clang.cindex.TypeKind.POINTER
-                
-                # 5. 템플릿 타입인지 확인
-                template_info = None
+                # 열거형 참조 확인 - 열거형은 래핑 필요
+                is_enum = False
                 try:
-                    template_info = self.template_detector.detect_template_type(pointee.spelling)
-                    is_template = template_info and template_info['is_template_type']
-                except:
-                    is_template = False
+                    # 직접적인 열거형 확인
+                    is_enum = (pointee.kind == clang.cindex.TypeKind.ENUM)
                     
-                # 6. 템플릿 인자인지 확인
-                is_template_arg = (
-                    theClass and theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE
-                    and templateArgs and pointee.spelling in templateArgs
-                )
-                
-                # 7. 복잡한 데이터 구조인지 확인 (클래스 선언 분석)
-                is_complex_type = False
-                try:
-                    # 클래스/구조체 타입인 경우
-                    if pointee.kind == clang.cindex.TypeKind.ELABORATED:
-                        type_decl = pointee.get_declaration()
-                        if type_decl and type_decl.kind in [
-                            clang.cindex.CursorKind.CLASS_DECL,
-                            clang.cindex.CursorKind.STRUCT_DECL
-                        ]:
-                            # 템플릿 인스턴스화인지 확인
-                            if type_decl.get_num_template_arguments() > 0:
-                                is_complex_type = True
+                    # 타입 이름이 아닌 타입 구조 자체 분석
+                    if not is_enum:
+                        # 때로는 열거형이 ELABORATED로 나올 수 있음
+                        if pointee.kind == clang.cindex.TypeKind.ELABORATED:
+                            underlying_type = pointee.get_named_type()
+                            is_enum = (underlying_type and underlying_type.kind == clang.cindex.TypeKind.ENUM)
+                        
+                        # 정규화된 타입 확인
+                        if not is_enum and pointee_canonical.kind == clang.cindex.TypeKind.ENUM:
+                            is_enum = True
                             
-                            # 상속 계층 구조 확인 (특정 기본 클래스를 가진 경우)
-                            for child in type_decl.get_children():
-                                if child.kind == clang.cindex.CursorKind.CXX_BASE_SPECIFIER:
-                                    base_name = child.type.spelling
-                                    if "NCollection_" in base_name or "Collection_" in base_name:
-                                        is_complex_type = True
-                                        break
-                                    
-                            # 멤버 필드 개수가 많은 복잡한 클래스인지 확인
-                            field_count = sum(1 for c in type_decl.get_children() 
-                                            if c.kind == clang.cindex.CursorKind.FIELD_DECL)
-                            if field_count > 5:  # 임의의 임계값
-                                is_complex_type = True
+                        # 타입 선언 확인을 통한 열거형 감지
+                        if not is_enum:
+                            for cursor in pointee.get_declaration().get_children():
+                                if cursor.kind == clang.cindex.CursorKind.ENUM_CONSTANT_DECL:
+                                    is_enum = True
+                                    break
                 except:
-                    # 타입 선언을 분석할 수 없는 경우 보수적으로 접근
+                    # 타입 분석 도중 발생할 수 있는 예외 처리
                     pass
 
-                # 래핑이 필요하지 않은 타입 리스트
-                skip_wrapping_types = [
-                    "Standard_OStream",
-                    "Standard_SStream",
-                ]
-                
-                if any(t in pointee.spelling for t in skip_wrapping_types):
-                    return False
-                
-                if (pointee_canonical.spelling not in builtInTypes 
-                    and pointee.kind != clang.cindex.TypeKind.ENUM
-                    and pointee.kind != clang.cindex.TypeKind.POINTER):
-                    return False
-                
-                if pointee.is_const_qualified():
-                        return False
-                    
-                # 열거형에 대한 참조는 특별 처리 필요
                 if is_enum:
                     return True
-                    
-                # 템플릿 타입에 대한 참조는 래핑 필요
-                if is_template:
+                
+                # 스트림 타입은 래핑 불필요
+                if any(term in pointee.spelling.lower() for term in ["stream", "ostream", "istream", "fstream", "ssteam"]):
+                    return False
+                
+                # 기본 타입(int, float 등)은 래핑 필요
+                # 이는 값 변경이 포인터를 통해 전달되어야 하기 때문
+                if pointee_canonical.spelling in builtInTypes:
                     return True
-                    
-                # 복잡한 데이터 구조는 래핑 필요
-                if is_complex_type:
+                
+                # 포인터에 대한 참조는 래핑 필요
+                if pointee.kind == clang.cindex.TypeKind.POINTER:
                     return True
-                    
-                # 기본 내장 타입, 포인터, 템플릿 인자인 경우 래핑 필요
-                if is_builtin or is_pointer or is_template_arg:
-                    return True
-                    
-                # 기본적으로 상수 참조는 래핑 불필요
-                return is_non_const
+                
+                # 템플릿 타입에 대한 특별 처리
+                try:
+                    # 템플릿 타입인지 확인
+                    if '<' in pointee.spelling and '>' in pointee.spelling:
+                        # 특수 템플릿 타입 목록에 있는 경우만 래핑
+                        for special_template in special_template_types:
+                            if special_template in pointee.spelling:
+                                return True
+                except:
+                    pass
+
+                is_user_defined_type = (
+                    pointee.kind in [
+                        clang.cindex.TypeKind.RECORD,
+                        clang.cindex.TypeKind.ELABORATED,
+                        clang.cindex.TypeKind.UNEXPOSED
+                    ]
+                )
+
+                if is_user_defined_type:
+                    # 템플릿 타입 분석
+                    try:
+                        template_info = self.template_detector.detect_template_type(pointee_canonical.spelling)
+                        is_template = template_info and template_info['is_template_type']
+                        
+                        # 템플릿 인자 확인
+                        is_template_arg = (
+                            theClass and 
+                            theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE and
+                            templateArgs and 
+                            pointee_canonical.spelling in templateArgs
+                        )
+                        
+                        # 템플릿 관련 타입은 래핑 필요
+                        if is_template or is_template_arg:
+                            return True
+                            
+                        return False
+                    except:
+                        pass
+                
+                # 이외의 모든 타입은 기본적으로 래핑하지 않음
+                return False
 
             args = list(method.get_arguments())
             argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg.type), args))
