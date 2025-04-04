@@ -307,7 +307,7 @@ def parse(additionalCppCode=""):
         [["myMain.h", OCCT_INCLUDE_STATEMENTS + "\n" + additionalCppCode]],
     )
 
-    diagnostics = [d for unit in translationUnit.diagnostics if "'bits/alltypes.h' file not found" not in unit]
+    diagnostics = [d for unit in translationUnit.diagnostics if "'bits/alltypes.h' file not found" not in unit.format()]
 
     if len(diagnostics) > 0:
         print("Diagnostic Messages:")

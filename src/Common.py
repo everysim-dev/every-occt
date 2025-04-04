@@ -54,5 +54,6 @@ buildOptions = [
     "-sMALLOC=emmalloc",
     "-Wno-deprecated-declarations",
     "-Wno-delete-abstract-non-virtual-dtor",
+    # "-std=c++20",
     "-Os",
 ]

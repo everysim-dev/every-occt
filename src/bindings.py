@@ -133,47 +133,11 @@ def isCString(type):
 def getClassTypeName(theClass, templateDecl=None):
     return templateDecl.spelling if templateDecl is not None else theClass.spelling
 
-
-def get_canonical_spelling(type_obj: clang.cindex.Type) -> str:
-    """Gets the canonical spelling, handling potential pointer/reference layers."""
-    # Go to the base type if it's a pointer or reference before getting canonical
-    base_type = type_obj
-    if base_type.kind == clang.cindex.TypeKind.POINTER:
-        base_type = base_type.get_pointee()
-    elif base_type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
-         base_type = base_type.get_pointee()
-    elif base_type.kind == clang.cindex.TypeKind.RVALUEREFERENCE:
-         base_type = base_type.get_pointee()
-
-    # Return canonical spelling of the potentially pointed-to/referenced type
-    # If the original type was a pointer/ref, the canonical spelling might still include it.
-    # Often, we want the canonical name of the *underlying* class/struct/enum.
-    # Let's try getting canonical directly first, as it often handles scope correctly.
-    canonical_str = type_obj.get_canonical().spelling
-
-    # Basic sanity check/fallback for extremely problematic cases (rare)
-    if not canonical_str or "anonymous" in canonical_str:
-         # Fallback to non-canonical if canonical fails badly
-         # You might want more sophisticated handling here
-         print(f"WARN: Canonical spelling problematic ('{canonical_str}') for type '{type_obj.spelling}'. Falling back.")
-         return type_obj.spelling
-
-    # Remove leading/trailing whitespace which can sometimes appear
-    return canonical_str.strip()
-
 class Bindings:
     def __init__(self, typedefs, templateTypedefs, translationUnit):
         self.templateTypedefs = templateTypedefs
         self.translationUnit = translationUnit
         self.typedefs = typedefs
-
-    def get_canonical_spelling(self, type_obj: clang.cindex.Type) -> str:
-        # Same logic as the standalone function above
-        canonical_str = type_obj.get_canonical().spelling
-        if not canonical_str or "anonymous" in canonical_str:
-             print(f"WARN: Canonical spelling problematic ('{canonical_str}') for type '{type_obj.spelling}'. Falling back.")
-             return type_obj.spelling
-        return canonical_str.strip()
 
     def getTypedefedTemplateTypeAsString(
         self, theTypeSpelling, templateDecl=None, templateArgs=None
@@ -228,20 +192,6 @@ class Bindings:
              # className = theClass.type.spelling # Original fallback
         isAbstract = isAbstractClass(theClass, self.translationUnit)
 
-        baseSpec = list(
-            filter(
-                lambda x: x.kind == clang.cindex.CursorKind.CXX_BASE_SPECIFIER
-                and x.access_specifier == clang.cindex.AccessSpecifier.PUBLIC,
-                theClass.get_children(),
-            )
-        )
-
-        if len(baseSpec) > 0:
-            # *** Use canonical spelling for the base class type ***
-            base_class_canonical_spelling = self.get_canonical_spelling(baseSpec[0].type)
-            baseClassBinding = ", base<" + base_class_canonical_spelling + ">"
-        else:
-            baseClassBinding = ""
         if not isAbstract:
             output += self.processSimpleConstructor(theClass)
         for method in theClass.get_children():
@@ -524,7 +474,7 @@ class EmbindBindings(Bindings):
         argTypesBindings = ", ".join(
             list(
                 map(
-                    lambda x: x.type.spelling, list(standardConstructor.get_arguments())
+                    lambda x: x.type.get_canonical().spelling, list(standardConstructor.get_arguments())
                 )
             )
         )
@@ -617,59 +567,110 @@ class EmbindBindings(Bindings):
         ):
             [overloadPostfix, numOverloads] = getMethodOverloadPostfix(theClass, method)
 
-            def needsWrapper(type):
+            def needsWrapper(type, theClass=None, templateArgs=None):
+                # C 문자열 포인터인 경우
+                if type.get_canonical().kind == clang.cindex.TypeKind.POINTER and isCString(type):
+                    return True
+                    
+                # LValueReference 분석
+                if type.kind != clang.cindex.TypeKind.LVALUEREFERENCE:
+                    return False
+                
+                pointee = type.get_pointee()
+                pointee_canonical = pointee.get_canonical()
+                
+                # 1. 비상수(non-const) 참조 여부 확인 - 이는 항상 래핑 필요
+                is_non_const = not pointee.is_const_qualified()
+                
+                # 2. 기본 내장 타입인지 확인
+                is_builtin = pointee_canonical.spelling in builtInTypes
+                
+                # 3. 열거형(enum) 타입인지 확인
+                is_enum = pointee.kind == clang.cindex.TypeKind.ENUM
+                
+                # 4. 포인터 타입인지 확인
+                is_pointer = pointee.kind == clang.cindex.TypeKind.POINTER
+                
+                # 5. 템플릿 타입인지 확인
+                template_info = None
+                try:
+                    template_info = self.template_detector.detect_template_type(pointee.spelling)
+                    is_template = template_info and template_info['is_template_type']
+                except:
+                    is_template = False
+                    
+                # 6. 템플릿 인자인지 확인
+                is_template_arg = (
+                    theClass and theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE
+                    and templateArgs and pointee.spelling in templateArgs
+                )
+                
+                # 7. 복잡한 데이터 구조인지 확인 (클래스 선언 분석)
+                is_complex_type = False
+                try:
+                    # 클래스/구조체 타입인 경우
+                    if pointee.kind == clang.cindex.TypeKind.ELABORATED:
+                        type_decl = pointee.get_declaration()
+                        if type_decl and type_decl.kind in [
+                            clang.cindex.CursorKind.CLASS_DECL,
+                            clang.cindex.CursorKind.STRUCT_DECL
+                        ]:
+                            # 템플릿 인스턴스화인지 확인
+                            if type_decl.get_num_template_arguments() > 0:
+                                is_complex_type = True
+                            
+                            # 상속 계층 구조 확인 (특정 기본 클래스를 가진 경우)
+                            for child in type_decl.get_children():
+                                if child.kind == clang.cindex.CursorKind.CXX_BASE_SPECIFIER:
+                                    base_name = child.type.spelling
+                                    if "NCollection_" in base_name or "Collection_" in base_name:
+                                        is_complex_type = True
+                                        break
+                                    
+                            # 멤버 필드 개수가 많은 복잡한 클래스인지 확인
+                            field_count = sum(1 for c in type_decl.get_children() 
+                                            if c.kind == clang.cindex.CursorKind.FIELD_DECL)
+                            if field_count > 5:  # 임의의 임계값
+                                is_complex_type = True
+                except:
+                    # 타입 선언을 분석할 수 없는 경우 보수적으로 접근
+                    pass
+
                 # 래핑이 필요하지 않은 타입 리스트
                 skip_wrapping_types = [
                     "Standard_OStream",
                     "Standard_SStream",
                 ]
                 
-                # LValueReference이고 특정 타입을 가리키는 경우 래핑 불필요
-                if type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
-                    pointee = type.get_pointee()
-                    pointee_spelling = pointee.spelling
-                    pointee_canonical = pointee.get_canonical()
-
-                    template_info = self.template_detector.detect_template_type(pointee_spelling)
-                    if template_info['is_template_type']:
-                        return True
-                    
-                    # 특정 타입이 포함된 LValueReference인 경우
-                    if any(t in pointee.spelling for t in skip_wrapping_types):
-                        return False
-                    
-                    # builtInTypes에 없고, enum이나 포인터가 아닌 LValueReference인 경우
-                    if (pointee_canonical.spelling not in builtInTypes 
-                        and pointee.kind != clang.cindex.TypeKind.ENUM
-                        and pointee.kind != clang.cindex.TypeKind.POINTER):
-                        return False
-
-                    if pointee.kind == clang.cindex.TypeKind.ENUM:
-                        return True
-                    
-                    # const-qualified된 LValueReference인 경우
-                    if pointee.is_const_qualified():
-                        return False
-                    
-                    # 래핑이 필요한 LValueReference 케이스
-                    is_builtin = pointee_canonical.spelling in builtInTypes
-                    is_enum = pointee.kind == clang.cindex.TypeKind.ENUM
-                    is_pointer = pointee.kind == clang.cindex.TypeKind.POINTER
-                    is_non_const = not pointee.is_const_qualified()
-                    
-                    is_template_arg_builtin = (
-                        theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE
-                        and pointee.spelling in templateArgs
-                        and templateArgs[pointee.spelling].get_canonical().spelling in builtInTypes
-                    )
-                    
-                    return is_builtin or is_non_const or is_enum or is_pointer or is_template_arg_builtin
+                if any(t in pointee.spelling for t in skip_wrapping_types):
+                    return False
                 
-                # C 문자열 포인터인 경우
-                if type.get_canonical().kind == clang.cindex.TypeKind.POINTER and isCString(type):
+                if (pointee_canonical.spelling not in builtInTypes 
+                    and pointee.kind != clang.cindex.TypeKind.ENUM
+                    and pointee.kind != clang.cindex.TypeKind.POINTER):
+                    return False
+                
+                if pointee.is_const_qualified():
+                        return False
+                    
+                # 열거형에 대한 참조는 특별 처리 필요
+                if is_enum:
                     return True
-                
-                return False
+                    
+                # 템플릿 타입에 대한 참조는 래핑 필요
+                if is_template:
+                    return True
+                    
+                # 복잡한 데이터 구조는 래핑 필요
+                if is_complex_type:
+                    return True
+                    
+                # 기본 내장 타입, 포인터, 템플릿 인자인 경우 래핑 필요
+                if is_builtin or is_pointer or is_template_arg:
+                    return True
+                    
+                # 기본적으로 상수 참조는 래핑 불필요
+                return is_non_const
 
             args = list(method.get_arguments())
             argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg.type), args))
