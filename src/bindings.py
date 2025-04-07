@@ -182,6 +182,7 @@ class Bindings:
     def getTypedefedTemplateTypeAsString(
         self, theTypeSpelling, templateDecl=None, templateArgs=None, type_obj=None
     ):
+        # 우선 템플릿 인자 치환
         if templateDecl is None:
             typedefType = next(
                 (
@@ -212,13 +213,26 @@ class Bindings:
                 rawTemplateType if rawTypedefType is None else rawTypedefType.spelling
             )
             typedefType = templateType.replace(rawTemplateType, rawTypedefType)
-        # fully qualified name 최우선 반환
+
+        # 템플릿 타입인 경우, 재귀적으로 fully qualified name 생성
         if type_obj is not None:
             fq_name = get_fully_qualified_type_name(type_obj)
+            # IndexedDataMap 같은 템플릿 타입이 제대로 반환되지 않으면, canonical spelling 사용
+            if (not fq_name or fq_name == "" or fq_name in ["int", "unsigned int", "long", "unsigned long"]) and hasattr(type_obj, 'get_canonical'):
+                canonical = type_obj.get_canonical()
+                canonical_name = canonical.spelling.strip()
+                # 템플릿 타입이고, int 등 기본형이 아니면 canonical 사용
+                if '<' in canonical_name and '>' in canonical_name:
+                    return canonical_name
             if fq_name and fq_name != "":
                 return fq_name
+
         if typedefType is not None:
-            return typedefType
+            # IndexedDataMap 같은 템플릿 타입이 int 등으로 fallback되는 경우 방지
+            if '<' in typedefType and '>' in typedefType:
+                return typedefType
+
+        # 마지막 fallback
         return theTypeSpelling
 
     def replaceTemplateArgs(self, string, templateArgs=None):
@@ -302,8 +316,8 @@ class TemplateTypeDetector:
         # NCollection 기반 다른 컬렉션 타입들
         elif any(pattern in class_name for pattern in ["HListOf", "HMapOf", "HSetOf"]):
             for pattern, replacement in [
-                ("HListOf", "ListOf"), 
-                ("HMapOf", "MapOf"), 
+                ("HListOf", "ListOf"),
+                ("HMapOf", "MapOf"),
                 ("HSetOf", "SetOf")
             ]:
                 if pattern in class_name:
@@ -311,6 +325,16 @@ class TemplateTypeDetector:
                     result['template_pattern'] = pattern.replace("Of", "")
                     result['base_type_name'] = class_name.replace(pattern, replacement)
                     break
+        # NCollection_IndexedDataMap 감지 추가
+        elif "NCollection_IndexedDataMap" in class_name and '<' in class_name and '>' in class_name:
+            result['is_template_type'] = True
+            result['template_pattern'] = 'IndexedDataMap'
+            result['base_type_name'] = class_name.split('<')[0].strip()
+            args_part = class_name[class_name.find('<')+1:class_name.rfind('>')]
+            args = [arg.strip() for arg in args_part.split(',')]
+            if len(args) >= 2:
+                result['key_type'] = args[0]
+                result['value_type'] = args[1]
         elif '<' in class_name and '>' in class_name:
             base_part = class_name.split('<')[0].strip()
             args_part = class_name.split('<')[1].split('>')[0].strip()
@@ -454,6 +478,24 @@ class EmbindBindings(Bindings):
         className = getClassTypeName(theClass, templateDecl)
         if className == "":
             className = theClass.type.spelling
+
+        # 템플릿 타입 감지
+        template_info = self.template_detector.detect_template_type(className)
+        if template_info.get('is_template_type') and template_info.get('template_pattern') == 'IndexedDataMap':
+            key_type = template_info.get('key_type', 'TCollection_AsciiString')
+            value_type = template_info.get('value_type', 'Standard_Integer')
+
+            output += f"EMSCRIPTEN_BINDINGS({theClass.spelling if templateDecl is None else templateDecl.spelling}) {{\n"
+            output += f"  class_<{className}>(\"{className}\")\n"
+            output += f"    .constructor<>()\n"
+            output += f"    .function(\"Size\", &{className}::Size)\n"
+            output += f"    .function(\"Clear\", &{className}::Clear)\n"
+            output += f"    .function(\"Add\", select_overload<void(const {key_type}&, const {value_type}&)>(&{className}::Add))\n"
+            output += f"    .function(\"ChangeFromIndex\", &{className}::ChangeFromIndex, allow_raw_pointers())\n"
+            output += f"    .function(\"FindFromKey\", &{className}::FindFromKey, allow_raw_pointers())\n"
+            output += f"  ;\n"
+            output += "}\n\n"
+            return output
 
         is_non_copyable = self.is_non_copyable_class(theClass)
 
@@ -1026,6 +1068,14 @@ class EmbindBindings(Bindings):
         self, theClass, children=None, templateDecl=None, templateArgs=None
     ):
         output = ""
+
+        # 템플릿이 아닌 클래스는 템플릿 인자 사용하는 생성자 오버로딩 생략
+        is_template_class = (
+            theClass.kind == clang.cindex.CursorKind.CLASS_TEMPLATE or
+            (hasattr(theClass.type, 'get_num_template_arguments') and theClass.type.get_num_template_arguments() > 0)
+        )
+        if not is_template_class:
+            return ""
         if children is None:
             children = list(theClass.get_children())
         
@@ -1081,7 +1131,7 @@ class EmbindBindings(Bindings):
                 )
                 # print(f"DEBUG: 특수 처리 필요 매개변수: {len(param_info_list)}개")
 
-             # 매개변수 정보 인덱스별 사전 생성
+            # 매개변수 정보 인덱스별 사전 생성
             param_info_map = {info['index']: info for info in param_info_list}
             
             # 각 생성자 인자에 대해 처리
@@ -1101,15 +1151,15 @@ class EmbindBindings(Bindings):
                 # 템플릿 특수 처리가 필요한 경우 타입 오버라이드
                 final_type_for_binding = resolved_type_str
                 if x_idx in param_info_map:
-                     override_type = self.template_detector.get_correct_type_for_param(param_info_map[x_idx])
-                     if override_type:
-                         # HArray/HSequence의 초기값 생성자인지 확인
-                         if param_info_map[x_idx]['description'] == 'defaultValue':
-                             # 여기서 ElementType으로 타입을 강제 지정
-                             final_type_for_binding = f"const {template_info['value_type'].spelling} &" 
-                             print(f"DEBUG: Constructor init value type override: {final_type_for_binding}")
-                         else:
-                              final_type_for_binding = override_type
+                    override_type = self.template_detector.get_correct_type_for_param(param_info_map[x_idx])
+                    if override_type:
+                        # HArray/HSequence의 초기값 생성자인지 확인
+                        if param_info_map[x_idx]['description'] == 'defaultValue':
+                            # 여기서 ElementType으로 타입을 강제 지정
+                            final_type_for_binding = f"const {template_info['value_type'].spelling} &"
+                            print(f"DEBUG: Constructor init value type override: {final_type_for_binding}")
+                        else:
+                            final_type_for_binding = override_type
                 
                 # 배열 참조 처리
                 if "(&)" in final_type_for_binding and "[" in final_type_for_binding:
@@ -1120,6 +1170,26 @@ class EmbindBindings(Bindings):
                 
                 processed_arg_types_for_embind.append(final_type_for_binding)
                 processed_arg_names_for_init.append(arg_name)
+
+            # 템플릿 인자가 미치환된 채 남아있는지 검사하여, 있으면 이 생성자 바인딩 skip
+            has_unresolved_template = False
+            if templateArgs:
+                for t in processed_arg_types_for_embind:
+                    for key in templateArgs.keys():
+                        if key in t:
+                            has_unresolved_template = True
+                            break
+                    if has_unresolved_template:
+                        break
+            # 그래도 못 잡는 경우, 흔한 미치환 패턴인 'T' 또는 '<...>' 포함 여부 추가 검사
+            if not has_unresolved_template:
+                for t in processed_arg_types_for_embind:
+                    if 'T' in t or ('<' in t and '>' in t):
+                        has_unresolved_template = True
+                        break
+            if has_unresolved_template:
+                print(f"Skipping constructor overload {name}{overloadPostfix} due to unresolved template parameters")
+                continue
 
             # 리스트를 문자열로 조합
             args = ", ".join(processed_args_for_struct_def)

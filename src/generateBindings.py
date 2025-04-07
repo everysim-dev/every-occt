@@ -8,7 +8,6 @@ from filter.filterTypedefs import filterTypedef
 from filter.filterEnums import filterEnum
 from wasmGenerator.Common import ignoreDuplicateTypedef, SkipException
 from Common import ocIncludeFiles, includePathArgs
-import multiprocessing
 import os
 from filter.filterPackages import filterPackages
 from functools import partial
