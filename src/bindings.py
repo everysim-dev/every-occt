@@ -166,6 +166,7 @@ def get_fully_qualified_type_name(type_obj):
         cursor = cursor.lexical_parent
 
     fq_name = "::".join(reversed(names))
+    console.print(f"DEBUG: fq_name for {type_obj.spelling} -> {fq_name}")
     return fq_name if fq_name else spelling
 
 
@@ -223,6 +224,10 @@ class Bindings:
                 # 템플릿 타입이고, int 등 기본형이 아니면 canonical 사용
                 if '<' in canonical_name and '>' in canonical_name:
                     return canonical_name
+                # canonical 역시 기본형인데, 원래 typedefType이 템플릿 문자열이면 그것을 우선 사용
+                if typedefType is not None and '<' in typedefType and '>' in typedefType:
+                    return typedefType
+            # fq_name이 비어있지 않으면 무조건 fully qualified name 반환 (중첩 클래스 포함)
             if fq_name and fq_name != "":
                 return fq_name
 
@@ -1026,12 +1031,7 @@ class EmbindBindings(Bindings):
                             method.result_type.spelling, templateDecl, templateArgs
                         ),
                         f'({merge(", ", *map(lambda x: self.getSingleArgumentBinding(True, True, templateDecl, templateArgs, className=className)(x)[0], list(method.get_arguments())))})',
-                        pick(method.is_const_method(), "const", ""),
-                        pick(
-                            not method.is_static_method(),
-                            f", {getClassTypeName(theClass, templateDecl)}",
-                            "",
-                        ),
+                        pick(method.is_const_method(), " const", ""),
                         f">(&{className}::{method.spelling})",
                     )
 
@@ -1046,14 +1046,14 @@ class EmbindBindings(Bindings):
             and method.kind == clang.cindex.CursorKind.FIELD_DECL
         ):
             if method.type.kind == clang.cindex.TypeKind.CONSTANTARRAY:
-                print(
+                console.print(
                     "Cannot handle array properties, skipping "
                     + className
                     + "::"
                     + method.spelling
                 )
             elif not method.type.get_pointee().kind == clang.cindex.TypeKind.INVALID:
-                print(
+                console.print(
                     "Cannot handle pointer properties, skipping "
                     + className
                     + "::"
@@ -1128,7 +1128,7 @@ class EmbindBindings(Bindings):
                 param_info_list = self.template_detector.get_constructor_params_info(
                     template_info, constructor_args
                 )
-                # print(f"DEBUG: 특수 처리 필요 매개변수: {len(param_info_list)}개")
+                # console.print(f"DEBUG: 특수 처리 필요 매개변수: {len(param_info_list)}개")
 
             # 매개변수 정보 인덱스별 사전 생성
             param_info_map = {info['index']: info for info in param_info_list}
@@ -1272,7 +1272,7 @@ class TypescriptBindings(Bindings):
         baseClassDefinition = ""
         if len(baseSpec) > 0:
             if any(x in baseSpec[0].type.spelling for x in [":", "<"]):
-                print(
+                console.print(
                     f'Unsupported character for base class "{baseSpec[0].type.spelling}" ({theClass.spelling})'
                 )
             else:
@@ -1383,7 +1383,7 @@ class TypescriptBindings(Bindings):
             or ":" in resTypeName
             or "<" in resTypeName
         ):
-            print(
+            console.print(
                 "could not generate proper types for type name '"
                 + resTypeName
                 + "', using 'any' instead."
@@ -1407,7 +1407,7 @@ class TypescriptBindings(Bindings):
         )
         argTypeName = self.convertBuiltinTypes(argTypeName)
         if argTypeName == "" or "(" in argTypeName or ":" in argTypeName:
-            print(
+            console.print(
                 "could not generate proper types for type name '"
                 + argTypeName
                 + "', using 'any' instead."
