@@ -1,5 +1,7 @@
 from filter.filterIncludeFiles import filterIncludeFile
 from typing import Set
+from rich.console import Console
+console = Console()
 import os
 
 occtBasePath = "/occt/src/"

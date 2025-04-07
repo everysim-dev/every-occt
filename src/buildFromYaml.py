@@ -10,7 +10,7 @@ from cerberus import Validator
 from argparse import ArgumentParser
 from Common import ocIncludePaths, additionalIncludePaths
 from plumbum import local
-from Common import buildOptions
+from Common import buildOptions, console
 
 parser = ArgumentParser()
 parser.add_argument(dest="filename", help="Custom build input file (.yml)", metavar="FILE.yml")
@@ -77,7 +77,7 @@ def runBuild(build):
       f = open(additionalBindCodeFileName, "w")
       f.write(build["additionalBindCode"])
       f.close()
-      print(f"building {additionalBindCodeFileName}")
+      console.print(f"building {additionalBindCodeFileName}")
       emcc = local["emcc"][
         *buildOptions,
         "-pthread" if os.environ["threading"] == "multi-threaded" else "",
@@ -92,7 +92,7 @@ def runBuild(build):
     else:
       return None
   additionalBindCodeO = getAdditionalBindCodeO()
-  print(f"Running build: {build['name']}")
+  console.print(f"Running build: {build['name']}")
   bindingsO = []
   for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/bindings"):
     for item in filenames:
@@ -116,7 +116,7 @@ def runBuild(build):
     *build["emccFlags"],
   ]
   emcc()
-  print("Build finished")
+  console.print("Build finished")
 
 runBuild(buildConfig["mainBuild"])
 for extraBuild in buildConfig["extraBuilds"]:

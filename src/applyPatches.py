@@ -2,17 +2,18 @@
 
 import os
 import subprocess
+from Common import console
 
 os.chdir("/")
 
 for dirpath, dirnames, filenames in os.walk("/opencascade.js/src/patches"):
   for filename in filenames:
-    print("applying patch " + dirpath + "/" + filename)
+    console.print("applying patch " + dirpath + "/" + filename)
     patchFile = open(dirpath + "/" + filename, 'r')
     p = patchFile.read()
     patchFile.close()
     try:
       subprocess.check_call(["patch -p0 < '"+ dirpath + "/" + filename + "'"], stdout=subprocess.PIPE, shell=True)
-      print("...done applying patch")
+      console.print("...done applying patch")
     except:
       raise Exception("Could not apply patch!")

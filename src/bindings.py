@@ -8,7 +8,7 @@ from wasmGenerator.Common import (
 )
 from filter.filterClasses import filterClass
 from filter.filterMethodOrProperties import filterMethodOrProperty
-from Common import occtBasePath
+from Common import occtBasePath, console
 from typing import Tuple, List
 
 
@@ -58,7 +58,7 @@ def shouldProcessClass(child: clang.cindex.Cursor, occtBasePath: str):
             )
         )
         if len(baseSpec) > 1:
-            print("cannot handle multiple base classes (" + child.spelling + ")")
+            console.print("cannot handle multiple base classes (" + child.spelling + ")")
             return False
 
         return True
@@ -75,7 +75,6 @@ builtInTypes = [  # according to https://en.cppreference.com/w/cpp/language/type
     "signed short int",
     "unsigned short",
     "unsigned short int",
-    "int",
     "signed",
     "signed int",
     "unsigned",
@@ -263,7 +262,7 @@ class Bindings:
                     theClass, method, templateDecl, templateArgs
                 )
             except SkipException as e:
-                print(str(e))
+                console.print(str(e))
         output += self.processFinalizeClass()
         if not isAbstract:
             try:
@@ -271,7 +270,7 @@ class Bindings:
                     theClass, None, templateDecl, templateArgs
                 )
             except SkipException as e:
-                print(str(e))
+                console.print(str(e))
         return output
 
 class TemplateTypeDetector:
@@ -354,29 +353,29 @@ class TemplateTypeDetector:
             result['base_type_name'] = result['base_type_name'].replace("const", "").strip()
         
         # 기본 타입 찾기 (Array1, Array2, Sequence 등)
-        print(f"DEBUG: 템플릿 기본 타입 '{result['base_type_name']}' 검색 중...")
+        console.print(f"DEBUG: 템플릿 기본 타입 '{result['base_type_name']}' 검색 중...")
         base_type_cursor = self._find_base_type_cursor(result['base_type_name'])
         
         if base_type_cursor:
-            print(f"DEBUG: 기본 타입 커서 발견: {base_type_cursor.kind}")
+            console.print(f"DEBUG: 기본 타입 커서 발견: {base_type_cursor.kind}")
             # 컬렉션 타입 결정 (NCollection_Array1, NCollection_Array2 등)
             underlying_type = None
             if base_type_cursor.kind == clang.cindex.CursorKind.TYPEDEF_DECL:
                 underlying_type = base_type_cursor.underlying_typedef_type
                 result['collection_type'] = underlying_type.spelling
-                print(f"DEBUG: 컬렉션 타입: {result['collection_type']}")
+                console.print(f"DEBUG: 컬렉션 타입: {result['collection_type']}")
             
             # 값 타입 결정 (템플릿 인자)
             if underlying_type and underlying_type.get_num_template_arguments() > 0:
                 result['value_type'] = underlying_type.get_template_argument_type(0)
-                print(f"DEBUG: value_type: {result['value_type'].spelling}")
+                console.print(f"DEBUG: value_type: {result['value_type'].spelling}")
                 
                 # 항목 타입이 있는 경우 (예: NCollection_Array2의 두 번째 템플릿 인자)
                 if underlying_type.get_num_template_arguments() > 1:
                     result['item_type'] = underlying_type.get_template_argument_type(1)
-                    print(f"DEBUG: item_type: {result['item_type'].spelling}")
+                    console.print(f"DEBUG: item_type: {result['item_type'].spelling}")
         else:
-            print(f"WARNING: 기본 타입 '{result['base_type_name']}'을 찾을 수 없습니다.")
+            console.print(f"WARNING: 기본 타입 '{result['base_type_name']}'을 찾을 수 없습니다.")
             result['is_template_type'] = False
         
         # 결과 캐싱 및 반환
@@ -576,7 +575,7 @@ class EmbindBindings(Bindings):
                 children,
             )
         )
-        if len(publicConstructors) == 0 or len(publicConstructors) > 1:
+        if len(publicConstructors) != 1:
             return output
         standardConstructor = publicConstructors[0]
         if not standardConstructor:
@@ -635,7 +634,7 @@ class EmbindBindings(Bindings):
                 if '<' in typename and '>' in typename:
                     template_info = self.template_detector.detect_template_type(typename)
                     if template_info['is_template_type']:
-                        print(f"DEBUG: 템플릿 타입 처리: {typename}")
+                        console.print(f"DEBUG: 템플릿 타입 처리: {typename}")
                         changed = True
 
                 if arg.type.kind == clang.cindex.TypeKind.LVALUEREFERENCE:
@@ -1157,7 +1156,7 @@ class EmbindBindings(Bindings):
                         if param_info_map[x_idx]['description'] == 'defaultValue':
                             # 여기서 ElementType으로 타입을 강제 지정
                             final_type_for_binding = f"const {template_info['value_type'].spelling} &"
-                            print(f"DEBUG: Constructor init value type override: {final_type_for_binding}")
+                            console.print(f"DEBUG: Constructor init value type override: {final_type_for_binding}")
                         else:
                             final_type_for_binding = override_type
                 
@@ -1188,7 +1187,7 @@ class EmbindBindings(Bindings):
                         has_unresolved_template = True
                         break
             if has_unresolved_template:
-                print(f"Skipping constructor overload {name}{overloadPostfix} due to unresolved template parameters")
+                console.print(f"Skipping constructor overload {name}{overloadPostfix} due to unresolved template parameters")
                 continue
 
             # 리스트를 문자열로 조합
@@ -1335,15 +1334,14 @@ class TypescriptBindings(Bindings):
             "unsigned",
             "uint32_t",
             "unsigned int",
-            "unsigned long" "long",
+            "unsigned long",
+            "long",
             "long int",
             "unsigned short",
             "short",
             "short int",
             "float",
-            "unsigned float",
             "double",
-            "unsigned double",
         ]:
             return "number"
 

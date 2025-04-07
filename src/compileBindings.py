@@ -8,12 +8,18 @@ from plumbum import local
 from argparse import ArgumentParser
 from Common import buildOptions
 
-from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn
-from rich.console import Console
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+    MofNCompleteColumn,
+)
+from Common import console
 
 LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
-
-console = Console()
 
 def buildOneFile(args, item, debug=False):
     if not os.path.exists(f"{item}.o"):
@@ -22,8 +28,10 @@ def buildOneFile(args, item, debug=False):
                 *buildOptions,
                 args["threading"] == "multi-threaded" and "-pthread" or "",
                 *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
-                "-c", item,
-                "-o", f"{item}.o",
+                "-c",
+                item,
+                "-o",
+                f"{item}.o",
             ]
 
             console.print(f"building {item}")
@@ -55,6 +63,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
     console.print(f"Building {len(filesToBuild)} files")
 
     with Progress(
+        SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
@@ -65,13 +74,18 @@ def compileCustomCodeBindings(args, file="myMain.h"):
     ) as progress:
         task_id = progress.add_task("Compiling", total=len(filesToBuild))
         with ProcessPoolExecutor() as executor:
-            futures = [executor.submit(buildOneFile, args, item) for item in sorted(filesToBuild)]
+            futures = [
+                executor.submit(buildOneFile, args, item)
+                for item in sorted(filesToBuild)
+            ]
             for future in as_completed(futures):
                 item, result = future.result()
                 if result is not None:
                     progress.update(task_id, description=f"Building {item}", advance=1)
                 else:
-                    progress.update(task_id, description=f"Skipped or Failed {item}", advance=1)
+                    progress.update(
+                        task_id, description=f"Skipped or Failed {item}", advance=1
+                    )
 
 
 if __name__ == "__main__":

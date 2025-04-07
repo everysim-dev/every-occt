@@ -7,8 +7,7 @@ import os
 from filter.filterTypedefs import filterTypedef
 from filter.filterEnums import filterEnum
 from wasmGenerator.Common import ignoreDuplicateTypedef, SkipException
-from Common import ocIncludeFiles, includePathArgs
-import os
+from Common import ocIncludeFiles, includePathArgs, console
 from filter.filterPackages import filterPackages
 from functools import partial
 from plumbum import local
@@ -92,13 +91,12 @@ def processChildBatch(
 
         relOcFileName: str = child.extent.start.file.name.replace(OCCT_SRC_PATH, "")
         mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{os.path.dirname(relOcFileName)}")
-        mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
         filename = (
             f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{child.spelling}{extension}"
         )
 
         if not os.path.exists(filename):
-            print(f"Processing {child.spelling}")
+            console.print(f"Processing {child.spelling}")
             try:
                 output = processFunction(
                     tu,
@@ -110,9 +108,9 @@ def processChildBatch(
                 with open(filename, "w") as bindingsFile:
                     bindingsFile.write(output)
             except SkipException as e:
-                print(str(e))
+                console.print(str(e))
         else:
-            print(f"file {child.spelling}.cpp already exists, skipping")
+            console.print(f"file {child.spelling}.cpp already exists, skipping")
 
 
 def split(a, n):
@@ -133,6 +131,8 @@ def processChildren(
     customCode,
     customBuild,
 ):
+    children_list = list(generator(tu))
+
     func = partial(
         processChildBatch,
         customCode,
@@ -149,13 +149,13 @@ def processChildren(
     if not customBuild:
         import concurrent.futures
         numthreads = os.cpu_count()
-        batches = list(split(range(len(generator(tu))), numthreads))
+        batches = list(split(range(len(children_list)), numthreads))
         with concurrent.futures.ProcessPoolExecutor(max_workers=numthreads) as executor:
             futures = [executor.submit(func, batch) for batch in batches]
             for future in concurrent.futures.as_completed(futures):
                 future.result()
     else:
-        func(range(len(generator(tu))))
+        func(range(len(children_list)))
 
 
 def processTemplate(child):
@@ -317,9 +317,9 @@ def parse(additionalCppCode=""):
     diagnostics = [d for unit in translationUnit.diagnostics if "'bits/alltypes.h' file not found" not in unit.format()]
 
     if len(diagnostics) > 0:
-        print("Diagnostic Messages:")
+        console.print("Diagnostic Messages:")
         for d in diagnostics:
-            print("  " + d.format())
+            console.print("  " + d.format())
 
     return translationUnit
 

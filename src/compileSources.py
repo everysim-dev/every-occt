@@ -6,7 +6,7 @@ import multiprocessing
 from filter.filterSourceFiles import filterSourceFile
 from filter.filterPackages import filterPackages
 from plumbum import local
-from Common import buildOptions
+from Common import buildOptions, console
 
 from argparse import ArgumentParser
 
@@ -64,10 +64,10 @@ def buildObjectFiles(file, args):
   ]
 
   if not os.path.exists(f"{LIBRARY_BASE_PATH}/{relativeFile}.o"):
-    print(f"Building {relativeFile}")
+    console.print(f"Building {relativeFile}")
     return emcc()
   else:
-    print(f"{relativeFile}.o already exists, skipping")
+    console.print(f"{relativeFile}.o already exists, skipping")
     return None
 
 allModules = {}
