@@ -33,7 +33,6 @@ def pickWrap(
 def indent(level: int):
     return " " * level * 2
 
-
 def shouldProcessClass(child: clang.cindex.Cursor, occtBasePath: str):
     if child.get_definition() is None or not child == child.get_definition():
         return False
@@ -129,6 +128,47 @@ special_template_types = [
 def isCString(type):
     return type.get_canonical().spelling in cStringTypes
 
+def get_fully_qualified_type_name(type_obj):
+    """
+    libclang Type 또는 Cursor로부터 네임스페이스, 중첩 클래스, 템플릿 인자 포함한 완전 수식 타입명 생성
+    """
+    # Type이 아닌 Cursor가 들어오면, Cursor에서 Type 추출
+    if isinstance(type_obj, clang.cindex.Cursor):
+        type_obj = type_obj.type
+
+    # 템플릿 인자가 있으면 재귀적으로 처리
+    if hasattr(type_obj, 'get_num_template_arguments') and type_obj.get_num_template_arguments() > 0:
+        base_name = type_obj.spelling.split('<')[0].strip()
+        args = []
+        for i in range(type_obj.get_num_template_arguments()):
+            try:
+                arg_type = type_obj.get_template_argument_type(i)
+                if arg_type.kind != clang.cindex.TypeKind.INVALID:
+                    args.append(get_fully_qualified_type_name(arg_type))
+            except:
+                continue
+        return f"{base_name}<{', '.join(args)}>"
+    
+    # 이름이 비어있으면 INVALID
+    spelling = type_obj.spelling.strip()
+    if not spelling or spelling == 'void':
+        return spelling
+
+    # 중첩 클래스 처리
+    decl = type_obj.get_declaration()
+    if not decl or decl.kind == clang.cindex.CursorKind.NO_DECL_FOUND:
+        return spelling
+
+    names = []
+    cursor = decl
+    while cursor and cursor.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
+        if cursor.spelling:
+            names.append(cursor.spelling)
+        cursor = cursor.lexical_parent
+
+    fq_name = "::".join(reversed(names))
+    return fq_name if fq_name else spelling
+
 
 def getClassTypeName(theClass, templateDecl=None):
     return templateDecl.spelling if templateDecl is not None else theClass.spelling
@@ -140,7 +180,7 @@ class Bindings:
         self.typedefs = typedefs
 
     def getTypedefedTemplateTypeAsString(
-        self, theTypeSpelling, templateDecl=None, templateArgs=None
+        self, theTypeSpelling, templateDecl=None, templateArgs=None, type_obj=None
     ):
         if templateDecl is None:
             typedefType = next(
@@ -172,7 +212,14 @@ class Bindings:
                 rawTemplateType if rawTypedefType is None else rawTypedefType.spelling
             )
             typedefType = templateType.replace(rawTemplateType, rawTypedefType)
-        return theTypeSpelling if typedefType is None else typedefType
+        # fully qualified name 최우선 반환
+        if type_obj is not None:
+            fq_name = get_fully_qualified_type_name(type_obj)
+            if fq_name and fq_name != "":
+                return fq_name
+        if typedefType is not None:
+            return typedefType
+        return theTypeSpelling
 
     def replaceTemplateArgs(self, string, templateArgs=None):
         newString = string
@@ -431,10 +478,8 @@ class EmbindBindings(Bindings):
 
         if is_non_copyable:
             output += (
-                "  // 복사 불가능한 클래스에 대한 특수 바인딩\n"
+                "  // 복사 불가능한 클래스\n"
                 + "  class_<" + className + baseClassBinding + '>("' + className + '")\n'
-                + "    // 복사 생성자 대신 참조로 처리\n"
-                + "    .allow_subclass<internal::EmvalBindingType<" + className + "*>>()\n"
             )
         else:
             output += (
@@ -444,23 +489,6 @@ class EmbindBindings(Bindings):
         output += super().processClass(theClass, templateDecl, templateArgs)
 
         output += "}\n\n"
-
-        if is_non_copyable:
-            output += (
-                "// 복사 불가능한 클래스에 대한 헬퍼 함수\n"
-                + f"namespace emscripten {{ \n"
-                + f"  namespace internal {{ \n"
-                + f"    // 복사 불가능한 클래스의 소멸자 처리\n"
-                + f"    template<> void raw_destructor<{className}>({className}* ptr) {{ /* 수동 삭제 방지 */ }} \n"
-                + f"    // 값 대신 포인터로 처리하는 바인딩 타입\n"
-                + f"    template<> struct BindingType<{className}> : public BindingType<{className}*> {{\n"
-                + f"      static WireType toWireType(const {className}& value) {{\n"
-                + f"        return BindingType<{className}*>::toWireType(const_cast<{className}*>(&value), true);\n"
-                + f"      }}\n"
-                + f"    }};\n"
-                + f"  }}\n"
-                + f"}}\n\n"
-            )
 
         # Epilog
         nonPublicDestructor = any(
@@ -515,7 +543,7 @@ class EmbindBindings(Bindings):
         argTypesBindings = ", ".join(
             list(
                 map(
-                    lambda x: self.getTypedefedTemplateTypeAsString(x.type.spelling), 
+                    lambda x: self.getTypedefedTemplateTypeAsString(x.type.spelling, type_obj=x.type), 
                     list(standardConstructor.get_arguments())
                 )
             )
@@ -559,7 +587,7 @@ class EmbindBindings(Bindings):
                 changed = True
             else:
                 typename = self.getTypedefedTemplateTypeAsString(
-                    arg.type.spelling, templateDecl, templateArgs
+                    arg.type.spelling, templateDecl, templateArgs, type_obj=arg.type
                 )
 
                 if '<' in typename and '>' in typename:

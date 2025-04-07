@@ -122,6 +122,7 @@ def split(a, n):
 
 
 def processChildren(
+    tu,
     generator,
     buildType: str,
     extension: str,
@@ -133,7 +134,6 @@ def processChildren(
     customCode,
     customBuild,
 ):
-    tu = parse(customCode)
     func = partial(
         processChildBatch,
         customCode,
@@ -148,10 +148,13 @@ def processChildren(
         customBuild,
     )
     if not customBuild:
-        numthreads = multiprocessing.cpu_count()
-        batches = split(range(len(generator(tu))), numthreads)
-        with multiprocessing.Pool(processes=numthreads) as p:
-            p.map(func, batches)
+        import concurrent.futures
+        numthreads = os.cpu_count()
+        batches = list(split(range(len(generator(tu))), numthreads))
+        with concurrent.futures.ProcessPoolExecutor(max_workers=numthreads) as executor:
+            futures = [executor.submit(func, batch) for batch in batches]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
     else:
         func(range(len(generator(tu))))
 
@@ -253,7 +256,10 @@ def process(extension, preamble, customCode, customBuild):
     generationFuncTemplates = embindGenerationFuncTemplates
     generationFuncEnums = embindGenerationFuncEnums
 
+    tu = parse(customCode)
+
     processChildren(
+        tu,
         allChildrenGenerator,
         "bindings",
         extension,
@@ -266,6 +272,7 @@ def process(extension, preamble, customCode, customBuild):
         customBuild,
     )
     processChildren(
+        tu,
         templateTypedefGenerator,
         "bindings",
         extension,
@@ -278,6 +285,7 @@ def process(extension, preamble, customCode, customBuild):
         customBuild,
     )
     processChildren(
+        tu,
         enumGenerator,
         "bindings",
         extension,
@@ -322,9 +330,16 @@ referenceTypeTemplateDefs = (
     + "#include <emscripten/bind.h>\n"
     + "using namespace emscripten;\n"
     + "#include <functional>\n"
+    + "#include <type_traits>\n" 
     + "\n"
+    + "// 복사 가능/불가능 타입을 분류하는 Type Traits\n"
     + "template<typename T>\n"
-    + "T getReferenceValue(const emscripten::val& v) {\n"
+    + "struct is_non_copyable_type : std::false_type {};\n"
+    + "\n"
+    + "// 복사 가능한 타입을 위한 getReferenceValue\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<!is_non_copyable_type<T>::value && !std::is_arithmetic<T>::value, T>::type\n"
+    + "getReferenceValue(const emscripten::val& v) {\n"
     + '  if(!(v.typeOf().as<std::string>() == "object")) {\n'
     + "    return v.as<T>(allow_raw_pointers());\n"
     + '  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
@@ -333,13 +348,70 @@ referenceTypeTemplateDefs = (
     + '  throw("unsupported type");\n'
     + "}\n"
     + "\n"
+    + "// 복사 불가능한 타입을 위한 getReferenceValue\n"
     + "template<typename T>\n"
-    + "void updateReferenceValue(emscripten::val& v, T& val) {\n"
+    + "typename std::enable_if<is_non_copyable_type<T>::value, T&>::type\n"
+    + "getReferenceValue(const emscripten::val& v) {\n"
+    + '  if(!(v.typeOf().as<std::string>() == "object")) {\n'
+    + "    return *v.as<T*>(allow_raw_pointers());\n"
+    + '  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
+    + '    return *v["current"].as<T*>(allow_raw_pointers());\n'
+    + "  }\n"
+    + '  throw("unsupported type");\n'
+    + "}\n"
+    + "\n"
+    + "// 일반 타입을 위한 updateReferenceValue\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<!is_non_copyable_type<T>::value && !std::is_arithmetic<T>::value>::type\n"
+    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
     + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
     + '    v.set("current", val);\n'
     + "  }\n"
     + "}\n"
     + "\n"
+    + "// 복사 불가능한 타입을 위한 updateReferenceValue\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<is_non_copyable_type<T>::value>::type\n"
+    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
+    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
+    + '    v.set("current", std::addressof(val));\n'
+    + "  }\n"
+    + "}\n"
+    + "\n"
+    + "// 기본 타입의 참조 매개변수를 처리하기 위한 특수 래퍼\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<std::is_arithmetic<T>::value, emscripten::val>::type\n"
+    + "wrapReferenceParameter(T& value) {\n"
+    + "  emscripten::val obj = emscripten::val::object();\n"
+    + '  obj.set("value", value);\n'
+    + "  return obj;\n"
+    + "}\n"
+    + "\n"
+    + "// 기본 타입 참조 매개변수를 위한 getReferenceValue 특수화\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<std::is_arithmetic<T>::value, T&>::type\n"
+    + "getReferenceValue(const emscripten::val& v) {\n"
+    + "  static thread_local T temp;\n"  # 스레드 로컬 임시 변수 사용
+    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("value")) {\n'
+    + '    temp = v["value"].as<T>();\n'
+    + "    return temp;\n"
+    + "  }\n"
+    + "  temp = v.as<T>();\n"
+    + "  return temp;\n"
+    + "}\n"
+    + "\n"
+    + "// 기본 타입 참조 매개변수를 위한 updateReferenceValue 특수화\n"
+    + "template<typename T>\n"
+    + "typename std::enable_if<std::is_arithmetic<T>::value>::type\n"
+    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
+    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("value")) {\n'
+    + '    v.set("value", val);\n'
+    + "  } else {\n"
+    + "    emscripten::val obj = emscripten::val::object();\n"
+    + '    obj.set("value", val);\n'
+    + '    v.set("current", obj);\n'
+    + "  }\n"
+    + "}\n"
 )
 
 

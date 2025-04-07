@@ -26,7 +26,9 @@ RUN \
   cerberus==1.3.7 \
   argparse==1.4.0 \
   plumbum==1.9.0 \
-  rich==13.9.4
+  rich==13.9.4 \
+  pytest==8.3.5 \
+  pytest-mock==3.14.0
 
 ENV RAPIDJSON_VERSION=1.1.0
 ENV FREETYPE_VERSION=2-13-3
@@ -35,6 +37,7 @@ ENV _EMCC_CCACHE=1
 ENV COMPILER_WRAPPER=ccache
 ENV CCACHE_DIR=/opencascade.js/build/ccache
 ENV EM_CACHE=/opencascade.js/build/cache
+ENV CCACHE_RECACHE=1
 ENV CCACHE_MAXSIZE=25G
 
 WORKDIR /rapidjson
