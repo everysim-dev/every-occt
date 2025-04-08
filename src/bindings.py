@@ -126,16 +126,52 @@ special_template_types = [
 
 def isCString(type):
     return type.get_canonical().spelling in cStringTypes
+from pygccxml import parser, declarations
 
-def get_fully_qualified_type_name(type_obj):
+def resolve_element_t_with_castxml(header_path, include_paths=None):
+    xml_generator_path = "/usr/bin/castxml"
+    xml_generator_config = parser.xml_generator_configuration_t(
+        xml_generator_path=xml_generator_path,
+        xml_generator="castxml"
+    )
+    args = []
+    if include_paths:
+        for inc in include_paths:
+            args.append(f"-I{inc}")
+    xml_generator_config.cflags = " ".join(args)
+
+    decls = parser.parse([header_path], xml_generator_config)
+    global_ns = declarations.get_global_namespace(decls)
+    vec4i = global_ns.class_("NCollection_Vec4< int >")
+    element_t = vec4i.typedef("Element_t")
+    return str(element_t.decl_type)
+
+
+def get_fully_qualified_type_name(type_obj, typedefs=None, templateTypedefs=None):
     """
-    libclang Type 또는 Cursor로부터 네임스페이스, 중첩 클래스, 템플릿 인자 포함한 완전 수식 타입명 생성
+    libclang Type 또는 Cursor로부터 네임스페이스, 중첩 클래스, 템플릿 인자 포함한 완전 수식 타입명 생성 (일반화 버전)
     """
-    # Type이 아닌 Cursor가 들어오면, Cursor에서 Type 추출
+    # Cursor가 들어오면 Type으로 변환
     if isinstance(type_obj, clang.cindex.Cursor):
         type_obj = type_obj.type
 
-    # 템플릿 인자가 있으면 재귀적으로 처리
+    # 무효 타입 처리
+    if not type_obj or type_obj.kind == clang.cindex.TypeKind.INVALID:
+        return ""
+
+    # Element_t 등장 시 CastXML로 resolve 시도
+    spelling = type_obj.spelling.strip()
+    if any(keyword in spelling for keyword in ["Element_t", "TheItemType", "TheKeyType"]):
+        try:
+            resolved_type = resolve_element_t_with_castxml(
+                header_path=(type_obj.get_declaration().location.file.name if type_obj.get_declaration() and type_obj.get_declaration().location and type_obj.get_declaration().location.file else "myMain.h"),
+                include_paths=__import__("Common").ocIncludePaths
+            )
+            return resolved_type
+        except Exception as e:
+            print(f"CastXML resolve failed: {e}")
+
+    # 템플릿 인자 재귀 처리
     if hasattr(type_obj, 'get_num_template_arguments') and type_obj.get_num_template_arguments() > 0:
         base_name = type_obj.spelling.split('<')[0].strip()
         args = []
@@ -143,30 +179,89 @@ def get_fully_qualified_type_name(type_obj):
             try:
                 arg_type = type_obj.get_template_argument_type(i)
                 if arg_type.kind != clang.cindex.TypeKind.INVALID:
-                    args.append(get_fully_qualified_type_name(arg_type))
+                    fq_arg = get_fully_qualified_type_name(arg_type, typedefs, templateTypedefs)
+                    args.append(fq_arg)
             except:
                 continue
         return f"{base_name}<{', '.join(args)}>"
-    
-    # 이름이 비어있으면 INVALID
+
+    # 이름이 void 또는 비어있으면 그대로 반환
     spelling = type_obj.spelling.strip()
     if not spelling or spelling == 'void':
         return spelling
 
-    # 중첩 클래스 처리
+    # 템플릿 내부 typedef value_type 치환
+    decl = type_obj.get_declaration()
+    if decl and decl.spelling in ("value_type", "Element_t") and decl.semantic_parent:
+        parent = decl.semantic_parent
+        if hasattr(parent.type, 'get_num_template_arguments') and parent.type.get_num_template_arguments() > 0:
+            # 보통 첫 번째 템플릿 인자가 value_type
+            actual_type = parent.type.get_template_argument_type(0)
+            return get_fully_qualified_type_name(actual_type, typedefs, templateTypedefs)
+
+    # 템플릿 파라미터 타입 치환 (예: TheKeyType -> 실제 인자)
+    decl = type_obj.get_declaration()
+    if decl and decl.kind == clang.cindex.CursorKind.TEMPLATE_TYPE_PARAMETER and decl.semantic_parent:
+        parent = decl.semantic_parent
+        if hasattr(parent.type, 'get_num_template_arguments') and parent.type.get_num_template_arguments() > 0:
+            template_params = [
+                c for c in parent.get_children()
+                if c.kind == clang.cindex.CursorKind.TEMPLATE_TYPE_PARAMETER
+            ]
+            for idx, param in enumerate(template_params):
+                if param.spelling == decl.spelling:
+                    actual_type = parent.type.get_template_argument_type(idx)
+                    return get_fully_qualified_type_name(actual_type, typedefs, templateTypedefs)
+
+    # 템플릿 내부 타입 파라미터 일반 치환
+    decl = type_obj.get_declaration()
+    if decl and decl.semantic_parent:
+        parent = decl.semantic_parent
+        # 부모가 템플릿 인스턴스인지 확인
+        if hasattr(parent.type, 'get_num_template_arguments') and parent.type.get_num_template_arguments() > 0:
+            # 부모 템플릿 정의 내 템플릿 파라미터 목록
+            template_params = [
+                c for c in parent.get_children()
+                if c.kind == clang.cindex.CursorKind.TEMPLATE_TYPE_PARAMETER
+            ]
+            # 내부 타입이 부모 템플릿의 몇 번째 파라미터인지 찾기
+            for idx, param in enumerate(template_params):
+                if param.spelling == decl.spelling:
+                    # 해당 인덱스의 실제 템플릿 인자 타입 획득
+                    actual_type = parent.type.get_template_argument_type(idx)
+                    # 재귀 호출로 fully qualified name 반환
+                    return get_fully_qualified_type_name(actual_type, typedefs, templateTypedefs)
+
+    # 선언 커서 추출
     decl = type_obj.get_declaration()
     if not decl or decl.kind == clang.cindex.CursorKind.NO_DECL_FOUND:
         return spelling
 
+    # 네임스페이스 및 중첩 클래스 재귀 수집
     names = []
     cursor = decl
     while cursor and cursor.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
         if cursor.spelling:
             names.append(cursor.spelling)
-        cursor = cursor.lexical_parent
+        cursor = cursor.semantic_parent
 
-    fq_name = "::".join(reversed(names))
-    console.print(f"DEBUG: fq_name for {type_obj.spelling} -> {fq_name}")
+    fq_name = '::'.join(reversed(names))
+
+    # canonical fallback 보정: 기본형인데 typedef가 템플릿 타입이면 typedef 우선 반환
+    if (not fq_name or fq_name in ["int", "unsigned int", "long", "unsigned long"]) and hasattr(type_obj, 'get_canonical'):
+        canonical = type_obj.get_canonical()
+        canonical_name = canonical.spelling.strip()
+        if typedefs is not None:
+            for td in typedefs:
+                if td.underlying_typedef_type.spelling == canonical_name and '<' in td.spelling and '>' in td.spelling:
+                    return td.spelling
+        if templateTypedefs is not None:
+            for td in templateTypedefs:
+                if td.underlying_typedef_type.spelling == canonical_name and '<' in td.spelling and '>' in td.spelling:
+                    return td.spelling
+        if '<' in canonical_name and '>' in canonical_name:
+            return canonical_name
+
     return fq_name if fq_name else spelling
 
 
@@ -180,24 +275,45 @@ class Bindings:
         self.typedefs = typedefs
 
     def getTypedefedTemplateTypeAsString(
-        self, theTypeSpelling, templateDecl=None, templateArgs=None, type_obj=None
+        self, theTypeSpelling, templateDecl=None, templateArgs=None, type_obj=None, visited_typedefs=None
     ):
+        if visited_typedefs is None:
+            visited_typedefs = set()
+        if theTypeSpelling in visited_typedefs:
+            return theTypeSpelling
+        visited_typedefs.add(theTypeSpelling)
+
         # 우선 템플릿 인자 치환
         if templateDecl is None:
-            typedefType = next(
+            typedefCursor = next(
                 (
                     x
-                    for x in self.typedefs
-                    if x.location.file.name.startswith(occtBasePath)
-                    and x.underlying_typedef_type.spelling == theTypeSpelling
+                    for x in (self.typedefs + self.templateTypedefs)
+                    if (
+                        hasattr(x, "spelling") and (
+                            x.spelling == theTypeSpelling
+                            or (
+                                hasattr(x, "underlying_typedef_type")
+                                and x.underlying_typedef_type.spelling == theTypeSpelling
+                            )
+                        )
+                    )
                 ),
                 None,
             )
-            typedefType = None if typedefType is None else typedefType.spelling
+            if typedefCursor is not None:
+                # underlying type 재귀 추적
+                underlying = typedefCursor.underlying_typedef_type
+                resolved = self.getTypedefedTemplateTypeAsString(
+                    underlying.spelling, templateDecl, templateArgs, type_obj=underlying, visited_typedefs=visited_typedefs
+                )
+                return resolved
+            else:
+                return theTypeSpelling
         else:
             templateType = self.replaceTemplateArgs(theTypeSpelling, templateArgs)
             rawTemplateType = templateType.replace("&", "").replace("const", "").strip()
-            rawTypedefType = next(
+            rawTypedefCursor = next(
                 (
                     x
                     for x in self.templateTypedefs
@@ -209,14 +325,15 @@ class Bindings:
                 ),
                 None,
             )
-            rawTypedefType = (
-                rawTemplateType if rawTypedefType is None else rawTypedefType.spelling
-            )
+            if rawTypedefCursor is not None:
+                rawTypedefType = rawTypedefCursor.spelling
+            else:
+                rawTypedefType = rawTemplateType
             typedefType = templateType.replace(rawTemplateType, rawTypedefType)
 
         # 템플릿 타입인 경우, 재귀적으로 fully qualified name 생성
         if type_obj is not None:
-            fq_name = get_fully_qualified_type_name(type_obj)
+            fq_name = get_fully_qualified_type_name(type_obj, self.typedefs, self.templateTypedefs)
             # IndexedDataMap 같은 템플릿 타입이 제대로 반환되지 않으면, canonical spelling 사용
             if (not fq_name or fq_name == "" or fq_name in ["int", "unsigned int", "long", "unsigned long"]) and hasattr(type_obj, 'get_canonical'):
                 canonical = type_obj.get_canonical()
@@ -244,8 +361,14 @@ class Bindings:
         if templateArgs is None:
             return newString
         for key in templateArgs:
+            replacement = None
+            if templateArgs[key] is not None and hasattr(templateArgs[key], 'spelling') and templateArgs[key].spelling != "":
+                replacement = templateArgs[key].spelling
+            else:
+                # 기본값 없으면 int로 임시 치환
+                replacement = "int"
             p = re.compile("(\\W+|^)" + key + "(\\W|$)")
-            newString = p.sub("\\1" + templateArgs[key].spelling + "\\2", newString)
+            newString = p.sub("\\1" + replacement + "\\2", newString)
         return newString
 
     def processClass(self, theClass, templateDecl=None, templateArgs=None):
@@ -892,9 +1015,7 @@ class EmbindBindings(Bindings):
                 resultTypeSpelling = pick(
                     returnNeedsWrapper,
                     "emscripten::val",
-                    self.getTypedefedTemplateTypeAsString(
-                        method.result_type.spelling, templateDecl, templateArgs
-                    ),
+                    get_fully_qualified_type_name(method.result_type, self.typedefs, self.templateTypedefs),
                 )
                 functionBindingHead = merge(
                     "",
@@ -1021,17 +1142,38 @@ class EmbindBindings(Bindings):
                     f"{indent(2)})",
                 )
             else:
+                # 오버로드 개수 1개면 무조건 select_overload 사용 금지
                 if numOverloads == 1:
                     functionBinding = f" &{className}::{method.spelling}"
-                else:
+                elif method.is_static_method():
+                    # 정적 함수는 오버로드 수와 무관하게 select_overload 사용 금지
+                    # 오버로드 모호성 방지를 위해 정확한 함수 포인터 타입으로 캐스팅
                     functionBinding = merge(
                         "",
-                        " select_overload<",
+                        " static_cast<",
                         self.getTypedefedTemplateTypeAsString(
                             method.result_type.spelling, templateDecl, templateArgs
                         ),
-                        f'({merge(", ", *map(lambda x: self.getSingleArgumentBinding(True, True, templateDecl, templateArgs, className=className)(x)[0], list(method.get_arguments())))})',
-                        pick(method.is_const_method(), " const", ""),
+                        " (*)(",
+                        merge(", ", *map(lambda x: self.getSingleArgumentBinding(True, True, templateDecl, templateArgs, className=className)(x)[0], list(method.get_arguments()))),
+                        ")>",
+                        f"(&{className}::{method.spelling})",
+                    )
+                else:
+                    # 비정적 멤버 함수는 반환형 + (클래스::*)(인자들) [const] 으로 정확히 캐스팅 필요
+                    const_suffix = " const" if method.is_const_method() else ""
+                    functionBinding = merge(
+                        "",
+                        " static_cast<",
+                        self.getTypedefedTemplateTypeAsString(
+                            method.result_type.spelling, templateDecl, templateArgs
+                        ),
+                        " (",
+                        className,
+                        "::*)(",
+                        merge(", ", *map(lambda x: self.getSingleArgumentBinding(True, True, templateDecl, templateArgs, className=className)(x)[0], list(method.get_arguments()))),
+                        ")",
+                        const_suffix,
                         f">(&{className}::{method.spelling})",
                     )
 
@@ -1135,16 +1277,8 @@ class EmbindBindings(Bindings):
             
             # 각 생성자 인자에 대해 처리
             for x_idx, x in enumerate(constructor_args):
-                # 기본 타입 바인딩 정보 얻기
-                type_binding_info = self.getSingleArgumentBinding(
-                    argNames=False,
-                    isConstructor=True,
-                    templateDecl=templateDecl,
-                    templateArgs=templateArgs,
-                    className=class_name
-                )(x)
-                
-                resolved_type_str = type_binding_info[0]
+                # 네임스페이스 포함 완전 수식 타입명 얻기
+                resolved_type_str = get_fully_qualified_type_name(x.type)
                 arg_name = x.spelling if x.spelling else f'arg{x_idx}'
                 
                 # 템플릿 특수 처리가 필요한 경우 타입 오버라이드
@@ -1188,6 +1322,17 @@ class EmbindBindings(Bindings):
                         break
             if has_unresolved_template:
                 console.print(f"Skipping constructor overload {name}{overloadPostfix} due to unresolved template parameters")
+                continue
+
+            # 인자 중 정의가 없는 타입이 있으면 skip (forward 선언 등)
+            has_undefined_type = False
+            for arg in constructor_args:
+                decl = arg.type.get_declaration()
+                if not decl or not decl.is_definition():
+                    has_undefined_type = True
+                    break
+            if has_undefined_type:
+                console.print(f"Skipping constructor overload {name}{overloadPostfix} due to undefined argument type")
                 continue
 
             # 리스트를 문자열로 조합

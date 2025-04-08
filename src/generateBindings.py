@@ -12,9 +12,9 @@ from filter.filterPackages import filterPackages
 from functools import partial
 from plumbum import local
 
-LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
-BUILD_DIRECTORY = "/opencascade.js/build"
-OCCT_SRC_PATH = "/occt/src/"
+LIBRARY_BASE_PATH = os.environ.get("OCJS_BINDINGS_PATH", "/opencascade.js/build/bindings")
+BUILD_DIRECTORY = os.environ.get("OCJS_BUILD_PATH", "/opencascade.js/build")
+OCCT_SRC_PATH = os.environ.get("OCCT_SRC_PATH", "/occt/src/")
 OCCT_INCLUDE_STATEMENTS = os.linesep.join(
     map(lambda x: f'#include "{os.path.basename(x)}"', list(sorted(ocIncludeFiles)))
 )
@@ -36,28 +36,23 @@ def filterClasses(child, customBuild):
 
 
 def filterTemplates(child, customBuild):
+    # 공통 조건: typedef + underlying type이 ELABORATED 또는 UNEXPOSED
+    if not (child.kind == clang.cindex.CursorKind.TYPEDEF_DECL and (
+        child.underlying_typedef_type.kind == clang.cindex.TypeKind.ELABORATED or
+        child.underlying_typedef_type.kind == clang.cindex.TypeKind.UNEXPOSED
+    )):
+        return False
+
+    # customBuild 여부에 따른 파일 조건 분기
     if customBuild:
+        return child.location.file.name == "myMain.h"
+    else:
         return (
-            child.location.file.name == "myMain.h"
-            and child.kind == clang.cindex.CursorKind.TYPEDEF_DECL
-            and (
-                child.underlying_typedef_type.kind == clang.cindex.TypeKind.ELABORATED
-                or child.underlying_typedef_type.kind == clang.cindex.TypeKind.UNEXPOSED
-            )
-        )
-    return (
-        (
             child.extent.start.file.name.startswith(OCCT_SRC_PATH)
             and filterPackages(
                 os.path.basename(os.path.dirname(child.location.file.name))
             )
         )
-        and child.kind == clang.cindex.CursorKind.TYPEDEF_DECL
-        and (
-            child.underlying_typedef_type.kind == clang.cindex.TypeKind.ELABORATED
-            or child.underlying_typedef_type.kind == clang.cindex.TypeKind.UNEXPOSED
-        )
-    )
 
 
 def filterEnums(child, customBuild):
@@ -90,7 +85,7 @@ def processChildBatch(
             continue
 
         relOcFileName: str = child.extent.start.file.name.replace(OCCT_SRC_PATH, "")
-        mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{os.path.dirname(relOcFileName)}")
+        mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
         filename = (
             f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{child.spelling}{extension}"
         )
@@ -183,10 +178,10 @@ def processTemplate(child):
     for i, templateArgName in enumerate(templateArgNames):
         templateArgType = child.type.get_template_argument_type(i)
         if templateArgType.spelling == "":
-            raise SkipException(
-                f"Template argument type is empty for at least one argument. Is this class using default values for template arguments? This is currently not supported ({child.spelling})"
-            )
-        templateArgs[templateArgName.spelling] = templateArgType
+            # 기본 인자 사용 가능성 → None으로 저장
+            templateArgs[templateArgName.spelling] = None
+        else:
+            templateArgs[templateArgName.spelling] = templateArgType
 
     return [templateClass, templateArgs]
 
