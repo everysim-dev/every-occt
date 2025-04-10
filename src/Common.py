@@ -7,7 +7,7 @@ import os
 occtBasePath = "/occt/src/"
 
 
-def getGlobalIncludes() -> Set[str]:
+def getGlobalIncludes() -> list[list[str]]:
     includeFiles = list()
     additionalIncludePaths = list()
     for dirpath, dirnames, filenames in os.walk(occtBasePath):
@@ -33,10 +33,6 @@ includePathArgs = (
             lambda x: "-I" + x,
             [
                 "/emsdk/upstream/emscripten/system/include/",
-                "/emsdk/upstream/emscripten/system/lib/libcxx/include/",
-                "/emsdk/upstream/lib/clang/"
-                + next(os.walk("/emsdk/upstream/lib/clang/"))[1][0]
-                + "/include/",
                 "/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
             ],
         )

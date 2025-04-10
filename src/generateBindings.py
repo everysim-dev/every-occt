@@ -1,18 +1,19 @@
 #!/usr/bin/python3
 
 from typing import Callable
-from bindings import EmbindBindings, shouldProcessClass
-import clang.cindex
+from bindings import EmbindBindings
 import os
-from filter.filterTypedefs import filterTypedef
-from filter.filterEnums import filterEnum
-from wasmGenerator.Common import ignoreDuplicateTypedef, SkipException
+from wasmGenerator.Common import SkipException
 from Common import ocIncludeFiles, includePathArgs, console
-from filter.filterPackages import filterPackages
-from functools import partial
 from plumbum import local
+from pygccxml import parser, declarations, utils
+import tempfile, os
+from joblib import Parallel, delayed
+from typeguard import typechecked
 
-LIBRARY_BASE_PATH = os.environ.get("OCJS_BINDINGS_PATH", "/opencascade.js/build/bindings")
+LIBRARY_BASE_PATH = os.environ.get(
+    "OCJS_BINDINGS_PATH", "/opencascade.js/build/bindings"
+)
 BUILD_DIRECTORY = os.environ.get("OCJS_BUILD_PATH", "/opencascade.js/build")
 OCCT_SRC_PATH = os.environ.get("OCCT_SRC_PATH", "/occt/src/")
 OCCT_INCLUDE_STATEMENTS = os.linesep.join(
@@ -23,400 +24,359 @@ mkdirp = local["mkdir"]["-p"]
 rmrf = local["rm"]["-rf"]
 
 
-def filterClasses(child, customBuild):
-    if customBuild:
-        return child.location.file.name == "myMain.h" and shouldProcessClass(
-            child, OCCT_SRC_PATH
-        )
-    return (
-        child.extent.start.file.name.startswith(OCCT_SRC_PATH)
-        and filterPackages(os.path.basename(os.path.dirname(child.location.file.name)))
-        and shouldProcessClass(child, OCCT_SRC_PATH)
-    )
+referenceTypeTemplateDefs = """
+#include <emscripten/bind.h>
+#include <functional>
+
+using namespace emscripten;
+
+template<typename T>
+T getReferenceValue(const emscripten::val& v) {
+  if(!(v.typeOf().as<std::string>() == "object")) {
+    return v.as<T>(allow_raw_pointers());
+  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
+    return v["current"].as<T>(allow_raw_pointers());
+  }
+  throw("unsupported type");
+}
+
+template<typename T>
+void updateReferenceValue(emscripten::val& v, T& val) {
+  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
+    v.set("current", val);
+  }
+}
+
+"""
+
+@typechecked
+def getClass(decl: declarations.declaration_t) -> declarations.class_t | None:
+    while isinstance(decl, declarations.typedef_t):
+        decl = decl.decl_type
+        if hasattr(decl, "declaration"):
+            decl = decl.declaration
+
+    if isinstance(decl, declarations.class_t):
+        return decl
+
+    return None
 
 
-def filterTemplates(child, customBuild):
-    # 공통 조건: typedef + underlying type이 ELABORATED 또는 UNEXPOSED
-    if not (child.kind == clang.cindex.CursorKind.TYPEDEF_DECL and (
-        child.underlying_typedef_type.kind == clang.cindex.TypeKind.ELABORATED or
-        child.underlying_typedef_type.kind == clang.cindex.TypeKind.UNEXPOSED
-    )):
+@typechecked
+def filterCommon(decl: declarations.declaration_t) -> bool:
+    if not decl.location:
         return False
 
-    # customBuild 여부에 따른 파일 조건 분기
-    if customBuild:
-        return child.location.file.name == "myMain.h"
+    file_name = decl.location.file_name
+    if not file_name or not file_name.startswith(OCCT_SRC_PATH):
+        return False
+
+    if isinstance(decl.parent, declarations.class_t):
+        return any(map(lambda x: x is decl, decl.parent.public_members))
+
+    return True
+
+
+@typechecked
+def filterClasses(decl: declarations.declaration_t) -> bool:
+    if not isinstance(decl, declarations.class_t):
+        return False
+
+    return True
+
+
+@typechecked
+def filterTemplates(decl: declarations.declaration_t) -> bool:
+    theClass = getClass(decl)
+
+    if theClass is None:
+        return False
+
+    return filterClasses(theClass)
+
+
+@typechecked
+def filterEnums(decl: declarations.declaration_t) -> bool:
+    return isinstance(decl, declarations.enumeration_t)
+
+
+@typechecked
+def processChild(
+    decl: declarations.declaration_t,
+    buildType: str,
+    extension: str,
+    processFunction: Callable[..., str],
+    preamble: str,
+) -> None:
+    # pygccxml declaration용 이름
+    [originalName, childName] = getTypeName(decl)
+
+    file_path = None
+    if decl.location is not None:
+        file_path = decl.location.file_name
+
+    if file_path and file_path.startswith(OCCT_SRC_PATH):
+        relOcFileName = file_path.replace(OCCT_SRC_PATH, "")
+    elif file_path:
+        relOcFileName = os.path.basename(file_path)
     else:
-        return (
-            child.extent.start.file.name.startswith(OCCT_SRC_PATH)
-            and filterPackages(
-                os.path.basename(os.path.dirname(child.location.file.name))
+        relOcFileName = "unknown_header"
+
+    mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
+    filename = f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{childName}{extension}"
+
+    if not os.path.exists(filename):
+        try:
+            output = processFunction(preamble, decl)
+            with open(filename, "w") as bindingsFile:
+                bindingsFile.write(output)
+            console.print(f"Generated {filename}")
+        except SkipException as e:
+            console.print(str(e))
+        except Exception as e:
+            console.print_exception(show_locals=False)
+            raise e
+    else:
+        console.print(f"file {childName}.cpp already exists, skipping")
+
+
+@typechecked
+def strip_template_params(full_name: str) -> str:
+    idx = full_name.find("<")
+    return full_name[:idx] if idx != -1 else full_name
+
+
+@typechecked
+def getTypeName(decl: declarations.declaration_t) -> list[str]:
+    name = ""
+
+    if hasattr(decl, "base"):
+        base = decl.base
+
+        if hasattr(base, "name"):
+            name = base.name
+        elif hasattr(base, "decl_string"):
+            name = base.decl_string
+    elif hasattr(decl, "name"):
+        name = decl.name
+    elif hasattr(decl, "decl_string"):
+        name = decl.decl_string
+
+    return [name, strip_template_params(name)]
+
+
+@typechecked
+def processChildren(
+    ns: declarations.namespace_t,
+    buildType: str,
+    extension: str,
+    preamble: str,
+) -> None:
+    children = (
+        list(ns.declarations)
+        + list(ns.classes())
+        + list(ns.enumerations())
+        + list(ns.typedefs())
+    )
+
+    futures = []
+    parallel = Parallel(n_jobs=-1, backend="threading")
+
+    processed = set()
+
+    for child in children:
+        if not filterCommon(child):
+            continue
+
+        [originalName, childName] = getTypeName(child)
+
+        if childName in processed:
+            continue
+
+        processFunction = None
+
+        if filterClasses(child):
+            processFunction = embindGenerationFuncClasses
+        elif filterTemplates(child):
+            processFunction = embindGenerationFuncTemplates
+        elif filterEnums(child):
+            processFunction = embindGenerationFuncEnums
+        else:
+            continue
+
+        processed.add(childName)
+
+        console.log(f"Processing {childName}")
+
+        func = delayed(processChild)
+
+        futures.append(
+            func(
+                child,
+                buildType,
+                extension,
+                processFunction,
+                preamble,
             )
         )
 
+    out = parallel(futures)
 
-def filterEnums(child, customBuild):
-    if customBuild:
-        return child.location.file.name == "myMain.h"
-    return (
-        child.extent.start.file.name.startswith(OCCT_SRC_PATH)
-        and filterPackages(os.path.basename(os.path.dirname(child.location.file.name)))
-    ) and child.kind == clang.cindex.CursorKind.ENUM_DECL
+    print(f"Processed {len(out)} children")
 
 
-def processChildBatch(
-    customCode,
-    generator,
-    buildType: str,
-    extension: str,
-    filterFunction: Callable[[any], bool],
-    processFunction: Callable[[any, any], str],
-    typedefGenerator: any,
-    templateTypedefGenerator: any,
+@typechecked
+def embindGenerationFuncClasses(
     preamble: str,
-    customBuild: bool,
-    batch,
-):
-    tu = parse(customCode)
-    children = list(generator(tu)[batch.start : batch.stop])
-
-    for child in children:
-        if not filterFunction(child, customBuild) or child.spelling == "":
-            continue
-
-        relOcFileName: str = child.extent.start.file.name.replace(OCCT_SRC_PATH, "")
-        mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
-        filename = (
-            f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{child.spelling}{extension}"
-        )
-
-        if not os.path.exists(filename):
-            console.print(f"Processing {child.spelling}")
-            try:
-                output = processFunction(
-                    tu,
-                    preamble,
-                    child,
-                    typedefGenerator(tu),
-                    templateTypedefGenerator(tu),
-                )
-                with open(filename, "w") as bindingsFile:
-                    bindingsFile.write(output)
-            except SkipException as e:
-                console.print(str(e))
-        else:
-            console.print(f"file {child.spelling}.cpp already exists, skipping")
-
-
-def split(a, n):
-    k, m = divmod(len(a), n)
-    return (a[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n))
-
-
-def processChildren(
-    tu,
-    generator,
-    buildType: str,
-    extension: str,
-    filterFunction: Callable[[any], bool],
-    processFunction: Callable[[any, any], str],
-    typedefs: any,
-    templateTypedefs: any,
-    preamble: str,
-    customCode,
-    customBuild,
-):
-    children_list = list(generator(tu))
-
-    func = partial(
-        processChildBatch,
-        customCode,
-        generator,
-        buildType,
-        extension,
-        filterFunction,
-        processFunction,
-        typedefs,
-        templateTypedefs,
-        preamble,
-        customBuild,
-    )
-    if not customBuild:
-        import concurrent.futures
-        numthreads = os.cpu_count()
-        batches = list(split(range(len(children_list)), numthreads))
-        with concurrent.futures.ProcessPoolExecutor(max_workers=numthreads) as executor:
-            futures = [executor.submit(func, batch) for batch in batches]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-    else:
-        func(range(len(children_list)))
-
-
-def processTemplate(child):
-    templateRefs = list(
-        filter(
-            lambda x: x.kind == clang.cindex.CursorKind.TEMPLATE_REF,
-            child.get_children(),
-        )
-    )
-    if len(templateRefs) != 1:
-        raise SkipException(
-            f'The number of template refs for the template typedef "{child.spelling}" is not 1!'
-        )
-
-    templateClass = templateRefs[0].get_definition()
-    if templateClass is None:
-        raise SkipException(f"Template class is None ({child.spelling})")
-    templateArgNames = list(
-        filter(
-            lambda x: x.kind == clang.cindex.CursorKind.TEMPLATE_TYPE_PARAMETER,
-            templateClass.get_children(),
-        )
-    )
-    templateArgs = {}
-    for i, templateArgName in enumerate(templateArgNames):
-        templateArgType = child.type.get_template_argument_type(i)
-        if templateArgType.spelling == "":
-            # 기본 인자 사용 가능성 → None으로 저장
-            templateArgs[templateArgName.spelling] = None
-        else:
-            templateArgs[templateArgName.spelling] = templateArgType
-
-    return [templateClass, templateArgs]
-
-
-def embindGenerationFuncClasses(tu, preamble, child, typedefs, templateTypedefs) -> str:
-    embindings = EmbindBindings(typedefs, templateTypedefs, tu)
-    output = embindings.processClass(child)
-
-    return preamble + output
-
-
-def embindGenerationFuncTemplates(
-    tu, preamble, child, typedefs, templateTypedefs
+    child: declarations.class_t,
+    className: str = None,
 ) -> str:
-    [templateClass, templateArgs] = processTemplate(child)
-    embindings = EmbindBindings(typedefs, templateTypedefs, tu)
-    output = embindings.processClass(templateClass, child, templateArgs)
+    embindings = EmbindBindings()
+
+    if child.location is not None:
+        file_path = child.location.file_name
+        preamble = f'#include "{os.path.basename(file_path)}"\n{referenceTypeTemplateDefs}'
+
+    output = embindings.processClass(child, className=className)
 
     return preamble + output
 
 
-def embindGenerationFuncEnums(tu, preamble, child, typedefs, templateTypedefs) -> str:
-    embindings = EmbindBindings(typedefs, templateTypedefs, tu)
+@typechecked
+def embindGenerationFuncTemplates(
+    preamble: str,
+    child: declarations.declaration_t,
+) -> str:
+    templateClass = child
+
+    # pygccxml typedef_t 기반 템플릿 인스턴스 처리
+    templateClass = getClass(child)
+
+    if isinstance(templateClass, declarations.class_t):
+        return embindGenerationFuncClasses(
+            preamble, templateClass, className=child.name
+        )
+
+    return ""
+
+
+@typechecked
+def embindGenerationFuncEnums(
+    preamble: str,
+    child: declarations.enumeration_t,
+) -> str:
+    embindings = EmbindBindings()
+
+    if child.location is not None:
+        file_path = child.location.file_name
+        preamble = f'#include "{os.path.basename(file_path)}"\n{referenceTypeTemplateDefs}'
+
     output = embindings.processEnum(child)
 
     return preamble + output
 
 
-def templateTypedefGenerator(tu):
-    return list(
-        filter(
-            lambda x: x.kind == clang.cindex.CursorKind.TYPEDEF_DECL
-            and not (x.get_definition() is None or not x == x.get_definition())
-            and filterTypedef(x)
-            and x.type.get_num_template_arguments() != -1
-            and not ignoreDuplicateTypedef(x),
-            tu.cursor.get_children(),
-        )
-    )
+@typechecked
+def templateTypedefGenerator(ns: declarations.namespace_t):
+    """
+    pygccxml global_namespace에서 템플릿 인자를 가진 typedef만 반환
+    """
+    typedefs = []
+    for td in ns.typedefs():
+        try:
+            underlying = td.decl_type
+            # 템플릿 인자가 있는지 간단히 문자열로 판별
+            if "<" in str(underlying) and ">" in str(underlying):
+                typedefs.append(td)
+        except:
+            continue
+    return typedefs
 
 
-def typedefGenerator(tu):
-    return list(
-        filter(
-            lambda x: x.kind == clang.cindex.CursorKind.TYPEDEF_DECL,
-            tu.cursor.get_children(),
-        )
-    )
+@typechecked
+def typedefGenerator(ns: declarations.namespace_t):
+    """
+    pygccxml global_namespace에서 모든 typedef 반환
+    """
+    return list(ns.typedefs())
 
 
-def allChildrenGenerator(tu):
-    return list(tu.cursor.get_children())
-
-
-def enumGenerator(tu):
-    return list(
-        filter(
-            lambda x: x.kind == clang.cindex.CursorKind.ENUM_DECL and filterEnum(x),
-            tu.cursor.get_children(),
-        )
-    )
-
-
-def process(extension, preamble, customCode, customBuild):
-    generationFuncClasses = embindGenerationFuncClasses
-    generationFuncTemplates = embindGenerationFuncTemplates
-    generationFuncEnums = embindGenerationFuncEnums
-
+@typechecked
+def process(extension: str, preamble: str, customCode: str):
     tu = parse(customCode)
 
     processChildren(
         tu,
-        allChildrenGenerator,
         "bindings",
         extension,
-        filterClasses,
-        generationFuncClasses,
-        typedefGenerator,
-        templateTypedefGenerator,
         preamble,
-        customCode,
-        customBuild,
-    )
-    processChildren(
-        tu,
-        templateTypedefGenerator,
-        "bindings",
-        extension,
-        filterTemplates,
-        generationFuncTemplates,
-        typedefGenerator,
-        templateTypedefGenerator,
-        preamble,
-        customCode,
-        customBuild,
-    )
-    processChildren(
-        tu,
-        enumGenerator,
-        "bindings",
-        extension,
-        filterEnums,
-        generationFuncEnums,
-        typedefGenerator,
-        templateTypedefGenerator,
-        preamble,
-        customCode,
-        customBuild,
     )
 
 
-def parse(additionalCppCode=""):
-    index = clang.cindex.Index.create()
-    translationUnit = index.parse(
-        "myMain.h",
-        [
-            "-x",
-            "c++",
-            "-stdlib=libc++",
-            "-D__EMSCRIPTEN__",
-            "-std=c++17",
-            "-Wno-deprecated-declarations",
-        ]
-        + includePathArgs,
-        [["myMain.h", OCCT_INCLUDE_STATEMENTS + "\n" + additionalCppCode]],
+@typechecked
+def parse(additionalCppCode: str = ""):
+    """
+    CastXML + pygccxml 기반으로 헤더 파싱 및 global_namespace 반환
+    """
+    generator_path, generator_name = utils.find_xml_generator()
+
+    xml_generator_config = parser.xml_generator_configuration_t(
+        xml_generator_path=generator_path,
+        xml_generator=generator_name,
+        compiler_path="/emsdk/upstream/bin/clang++",
+        keep_xml=True,
+        # content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
     )
 
-    diagnostics = [d for unit in translationUnit.diagnostics if "'bits/alltypes.h' file not found" not in unit.format()]
+    # include path 인자 구성 + Emscripten 전용 플래그 추가
+    args = [*includePathArgs]
+    extra_flags = [
+        "-D__EMSCRIPTEN__",
+        "-std=c++17",
+    ]
 
-    if len(diagnostics) > 0:
-        console.print("Diagnostic Messages:")
-        for d in diagnostics:
-            console.print("  " + d.format())
+    xml_generator_config.cflags = " ".join(args + extra_flags)
 
-    return translationUnit
+    # 가상 헤더 파일 내용 생성
+    header_content = OCCT_INCLUDE_STATEMENTS + "\n" + additionalCppCode
+    # HEADER_NAME = generate()
+    HEADER_NAME = "myMain"
+    header_path = f"{HEADER_NAME}.h"
 
+    # 임시 헤더 파일 생성
+    tmp_dir = tempfile.gettempdir()
+    tmp_header_path = os.path.join(tmp_dir, header_path)
+    with open(tmp_header_path, "w") as f:
+        f.write(header_content)
 
-referenceTypeTemplateDefs = (
-    "\n"
-    + "#include <emscripten/bind.h>\n"
-    + "using namespace emscripten;\n"
-    + "#include <functional>\n"
-    + "#include <type_traits>\n" 
-    + "\n"
-    + "// 복사 가능/불가능 타입을 분류하는 Type Traits\n"
-    + "template<typename T>\n"
-    + "struct is_non_copyable_type : std::false_type {};\n"
-    + "\n"
-    + "// 복사 가능한 타입을 위한 getReferenceValue\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<!is_non_copyable_type<T>::value && !std::is_arithmetic<T>::value, T>::type\n"
-    + "getReferenceValue(const emscripten::val& v) {\n"
-    + '  if(!(v.typeOf().as<std::string>() == "object")) {\n'
-    + "    return v.as<T>(allow_raw_pointers());\n"
-    + '  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
-    + '    return v["current"].as<T>(allow_raw_pointers());\n'
-    + "  }\n"
-    + '  throw("unsupported type");\n'
-    + "}\n"
-    + "\n"
-    + "// 복사 불가능한 타입을 위한 getReferenceValue\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<is_non_copyable_type<T>::value, T&>::type\n"
-    + "getReferenceValue(const emscripten::val& v) {\n"
-    + '  if(!(v.typeOf().as<std::string>() == "object")) {\n'
-    + "    return *v.as<T*>(allow_raw_pointers());\n"
-    + '  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
-    + '    return *v["current"].as<T*>(allow_raw_pointers());\n'
-    + "  }\n"
-    + '  throw("unsupported type");\n'
-    + "}\n"
-    + "\n"
-    + "// 일반 타입을 위한 updateReferenceValue\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<!is_non_copyable_type<T>::value && !std::is_arithmetic<T>::value>::type\n"
-    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
-    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
-    + '    v.set("current", val);\n'
-    + "  }\n"
-    + "}\n"
-    + "\n"
-    + "// 복사 불가능한 타입을 위한 updateReferenceValue\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<is_non_copyable_type<T>::value>::type\n"
-    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
-    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {\n'
-    + '    v.set("current", std::addressof(val));\n'
-    + "  }\n"
-    + "}\n"
-    + "\n"
-    + "// 기본 타입의 참조 매개변수를 처리하기 위한 특수 래퍼\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<std::is_arithmetic<T>::value, emscripten::val>::type\n"
-    + "wrapReferenceParameter(T& value) {\n"
-    + "  emscripten::val obj = emscripten::val::object();\n"
-    + '  obj.set("value", value);\n'
-    + "  return obj;\n"
-    + "}\n"
-    + "\n"
-    + "// 기본 타입 참조 매개변수를 위한 getReferenceValue 특수화\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<std::is_arithmetic<T>::value, T&>::type\n"
-    + "getReferenceValue(const emscripten::val& v) {\n"
-    + "  static thread_local T temp;\n"  # 스레드 로컬 임시 변수 사용
-    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("value")) {\n'
-    + '    temp = v["value"].as<T>();\n'
-    + "    return temp;\n"
-    + "  }\n"
-    + "  temp = v.as<T>();\n"
-    + "  return temp;\n"
-    + "}\n"
-    + "\n"
-    + "// 기본 타입 참조 매개변수를 위한 updateReferenceValue 특수화\n"
-    + "template<typename T>\n"
-    + "typename std::enable_if<std::is_arithmetic<T>::value>::type\n"
-    + "updateReferenceValue(emscripten::val& v, T& val) {\n"
-    + '  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("value")) {\n'
-    + '    v.set("value", val);\n'
-    + "  } else {\n"
-    + "    emscripten::val obj = emscripten::val::object();\n"
-    + '    obj.set("value", val);\n'
-    + '    v.set("current", obj);\n'
-    + "  }\n"
-    + "}\n"
-)
+    file_config = parser.file_configuration_t(
+        data=tmp_header_path, content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
+    )
+
+    project_reader = parser.project_reader_t(
+        xml_generator_config, cache=parser.directory_cache_t
+    )
+
+    # pygccxml 파싱 수행
+    decls = project_reader.read_files(
+        [file_config], compilation_mode=parser.COMPILATION_MODE.ALL_AT_ONCE
+    )
+    global_ns = declarations.get_global_namespace(decls)
+
+    global_ns.init_optimizer()
+
+    return global_ns
 
 
-def generateCustomCodeBindings(customCode):
+@typechecked
+def generateCustomCodeBindings(customCode: str):
     mkdirp(LIBRARY_BASE_PATH)
 
     embindPreamble = (
         f"{OCCT_INCLUDE_STATEMENTS}\n{referenceTypeTemplateDefs}\n{customCode}"
     )
 
-    process(".cpp", embindPreamble, customCode, True)
+    process(".cpp", embindPreamble, customCode)
 
 
 if __name__ == "__main__":
@@ -425,4 +385,4 @@ if __name__ == "__main__":
 
     embindPreamble = f"{OCCT_INCLUDE_STATEMENTS}\n{referenceTypeTemplateDefs}"
 
-    process(".cpp", embindPreamble, "", False)
+    process(".cpp", embindPreamble, "")

@@ -12,7 +12,8 @@ RUN \
 RUN \
   add-apt-repository ppa:deadsnakes/ppa && \
   apt install -y \
-  python3.11 && \
+  python3.11 \
+  castxml && \
   rm -rf /var/lib/apt/lists/* && \
   rm /usr/bin/python3 && \
   ln -s $(which python3.11) /usr/bin/python3 && \
@@ -21,14 +22,16 @@ RUN \
 
 RUN \
   python3 -m pip install \
-  libclang==18.1.1 \
   pyyaml==6.0.2 \
   cerberus==1.3.7 \
   argparse==1.4.0 \
   plumbum==1.9.0 \
   rich==13.9.4 \
   pytest==8.3.5 \
-  pytest-mock==3.14.0
+  pytest-mock==3.14.0 \
+  pygccxml==3.0.2 \
+  typeguard==2.2.1 \
+  joblib==1.4.2
 
 ENV RAPIDJSON_VERSION=1.1.0
 ENV FREETYPE_VERSION=2-13-3

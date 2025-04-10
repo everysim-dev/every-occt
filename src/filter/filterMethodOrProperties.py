@@ -1,117 +1,111 @@
-import clang.cindex
+from typing import Union
+from pygccxml import declarations
 
-def filterMethodOrProperty(theClass, methodOrProperty):
-  # # error: no matching conversion for functional-style cast from '(lambda at /opencascade.js/build/modules/module.TKHLR.wasm.cpp:8477:153)' to 'std::function<HLRAlgo_BiPoint::PointsT &(HLRAlgo_PolyAlgo &, emscripten::val, emscripten::val, emscripten::val, emscripten::val, emscripten::val)>'
-  # if \
-  #   (theClass.spelling == "HLRAlgo_PolyAlgo" and methodOrProperty.spelling == "Show") or \
-  #   (theClass.spelling == "HLRAlgo_PolyAlgo" and methodOrProperty.spelling == "Hide") or \
-  #   (theClass.spelling == "TopOpeBRepDS_DataStructure" and methodOrProperty.spelling == "ChangeMapOfShapeWithState") or \
-  #   (theClass.spelling == "TopOpeBRepDS_TKI" and methodOrProperty.spelling == "ChangeValue"):
-  #   return False
 
+def filterMethodOrProperty(theClass: declarations.class_t, methodOrProperty: declarations.member_function_t) -> bool:
   # error: undefined symbol: _ZN16AppDef_MultiLine12SetParameterEid
-  if theClass.spelling == "AppDef_MultiLine" and methodOrProperty.spelling == "SetParameter":
+  if theClass.name == "AppDef_MultiLine" and methodOrProperty.name == "SetParameter":
     return False
 
   # error: overload of method DN has no implementation
-  if theClass.spelling == "BSplCLib" and methodOrProperty.spelling == "DN":
+  if theClass.name == "BSplCLib" and methodOrProperty.name == "DN":
     return False
 
   # error: overload of method Knots has no implementation
-  if theClass.spelling == "BlendFunc" and (
-    methodOrProperty.spelling == "Knots" or
-    methodOrProperty.spelling == "Mults"
+  if theClass.name == "BlendFunc" and (
+    methodOrProperty.name == "Knots" or
+    methodOrProperty.name == "Mults"
   ):
     return False
 
   # error: overload of method Error has no implementation
   if (
-    theClass.spelling == "AppDef_TheResol" or
-    theClass.spelling == "AppDef_ResConstraintOfTheGradient" or
-    theClass.spelling == "AppDef_ResConstraintOfMyGradientOfCompute" or
-    theClass.spelling == "AppDef_ResConstraintOfMyGradientbisOfBSplineCompute"
-  ) and methodOrProperty.spelling == "Error":
+    theClass.name == "AppDef_TheResol" or
+    theClass.name == "AppDef_ResConstraintOfTheGradient" or
+    theClass.name == "AppDef_ResConstraintOfMyGradientOfCompute" or
+    theClass.name == "AppDef_ResConstraintOfMyGradientbisOfBSplineCompute"
+  ) and methodOrProperty.name == "Error":
     return False
 
   # error: overload of method Dump has no implementation
-  if theClass.spelling == "BinTools_Curve2dSet" and methodOrProperty.spelling == "Dump":
+  if theClass.name == "BinTools_Curve2dSet" and methodOrProperty.name == "Dump":
     return False
 
   # error: call to deleted constructor of 'std::istream'
   if (
-    (theClass.spelling == "BinObjMgt_Persistent" and methodOrProperty.spelling == "Read") or
-    (theClass.spelling == "BinTools" and methodOrProperty.spelling == "GetReal") or
-    (theClass.spelling == "BinTools" and methodOrProperty.spelling == "GetShortReal") or
-    (theClass.spelling == "BinTools" and methodOrProperty.spelling == "GetInteger") or
-    (theClass.spelling == "BinTools" and methodOrProperty.spelling == "GetBool") or
-    (theClass.spelling == "BinTools" and methodOrProperty.spelling == "GetExtChar") or
-    (theClass.spelling == "BinTools_SurfaceSet" and methodOrProperty.spelling == "ReadSurface") or
-    (theClass.spelling == "BinTools_Curve2dSet" and methodOrProperty.spelling == "ReadCurve2d") or
-    (theClass.spelling == "BinTools_CurveSet" and methodOrProperty.spelling == "ReadCurve") or
-    (theClass.spelling == "BinTools_IStream" and methodOrProperty.spelling == "Stream")
+    (theClass.name == "BinObjMgt_Persistent" and methodOrProperty.name == "Read") or
+    (theClass.name == "BinTools" and methodOrProperty.name == "GetReal") or
+    (theClass.name == "BinTools" and methodOrProperty.name == "GetShortReal") or
+    (theClass.name == "BinTools" and methodOrProperty.name == "GetInteger") or
+    (theClass.name == "BinTools" and methodOrProperty.name == "GetBool") or
+    (theClass.name == "BinTools" and methodOrProperty.name == "GetExtChar") or
+    (theClass.name == "BinTools_SurfaceSet" and methodOrProperty.name == "ReadSurface") or
+    (theClass.name == "BinTools_Curve2dSet" and methodOrProperty.name == "ReadCurve2d") or
+    (theClass.name == "BinTools_CurveSet" and methodOrProperty.name == "ReadCurve") or
+    (theClass.name == "BinTools_IStream" and methodOrProperty.name == "Stream")
   ):
     return False
 
   # error: no matching function for call to object of type 'std::function<bool (MeshVS_DataSource &, int, bool, NCollection_Array1<double> &, emscripten::val, MeshVS_EntityType &)>'
   if \
-    (theClass.spelling == "MeshVS_DataSource" and methodOrProperty.spelling == "GetGeom") or \
-    (theClass.spelling == "MeshVS_DataSource" and methodOrProperty.spelling == "GetGeomType") or \
-    (theClass.spelling == "MeshVS_DeformedDataSource" and methodOrProperty.spelling == "GetGeom") or \
-    (theClass.spelling == "MeshVS_DeformedDataSource" and methodOrProperty.spelling == "GetGeomType") or \
-    (theClass.spelling == "Interface_STAT" and methodOrProperty.spelling == "Description") or \
-    (theClass.spelling == "Interface_STAT" and methodOrProperty.spelling == "Phase"):
+    (theClass.name == "MeshVS_DataSource" and methodOrProperty.name == "GetGeom") or \
+    (theClass.name == "MeshVS_DataSource" and methodOrProperty.name == "GetGeomType") or \
+    (theClass.name == "MeshVS_DeformedDataSource" and methodOrProperty.name == "GetGeom") or \
+    (theClass.name == "MeshVS_DeformedDataSource" and methodOrProperty.name == "GetGeomType") or \
+    (theClass.name == "Interface_STAT" and methodOrProperty.name == "Description") or \
+    (theClass.name == "Interface_STAT" and methodOrProperty.name == "Phase"):
     return False
 
   # error: calling a private constructor of class 'X'
   if \
-    (theClass.spelling == "VrmlData_Node" and methodOrProperty.spelling == "Scene") or \
-    (theClass.spelling == "Font_FTFont" and methodOrProperty.spelling == "GlyphImage") or \
-    (theClass.spelling == "LDOMString" and methodOrProperty.spelling == "getOwnerDocument") or \
-    (theClass.spelling == "LDOM_MemManager" and methodOrProperty.spelling == "Self") or \
-    (theClass.spelling == "Aspect_VKeySet" and methodOrProperty.spelling == "Mutex") or \
-    (theClass.spelling == "Image_VideoRecorder" and methodOrProperty.spelling == "ChangeFrame") or \
-    (theClass.spelling == "StdPrs_BRepFont" and methodOrProperty.spelling == "Mutex") or \
-    (theClass.spelling == "AdvApp2Var_Network" and methodOrProperty.spelling == "ChangePatch") or \
-    (theClass.spelling == "AdvApp2Var_Framework" and methodOrProperty.spelling == "IsoU") or \
-    (theClass.spelling == "LDOM_Node" and methodOrProperty.spelling == "getOwnerDocument") or \
-    (theClass.spelling == "AdvApp2Var_Network" and methodOrProperty.spelling == "Patch") or \
-    (theClass.spelling == "AdvApp2Var_Framework" and methodOrProperty.spelling == "IsoV"):
+    (theClass.name == "VrmlData_Node" and methodOrProperty.name == "Scene") or \
+    (theClass.name == "Font_FTFont" and methodOrProperty.name == "GlyphImage") or \
+    (theClass.name == "LDOMString" and methodOrProperty.name == "getOwnerDocument") or \
+    (theClass.name == "LDOM_MemManager" and methodOrProperty.name == "Self") or \
+    (theClass.name == "Aspect_VKeySet" and methodOrProperty.name == "Mutex") or \
+    (theClass.name == "Image_VideoRecorder" and methodOrProperty.name == "ChangeFrame") or \
+    (theClass.name == "StdPrs_BRepFont" and methodOrProperty.name == "Mutex") or \
+    (theClass.name == "AdvApp2Var_Network" and methodOrProperty.name == "ChangePatch") or \
+    (theClass.name == "AdvApp2Var_Framework" and methodOrProperty.name == "IsoU") or \
+    (theClass.name == "LDOM_Node" and methodOrProperty.name == "getOwnerDocument") or \
+    (theClass.name == "AdvApp2Var_Network" and methodOrProperty.name == "Patch") or \
+    (theClass.name == "AdvApp2Var_Framework" and methodOrProperty.name == "IsoV"):
     return False
 
   # error: non-const lvalue reference to type 'X' cannot bind to a temporary of type 'X'
   if \
-    (theClass.spelling == "Resource_Unicode") or \
-    (theClass.spelling == "NCollection_DataMap" and methodOrProperty.spelling == "Find") or \
-    (theClass.spelling == "OSD_Thread" and methodOrProperty.spelling == "Wait") or \
-    (theClass.spelling == "TCollection_ExtendedString" and methodOrProperty.spelling == "ToUTF8CString") or \
-    (theClass.spelling == "Message" and methodOrProperty.spelling == "ToOSDMetric") or \
-    (theClass.spelling == "OSD" and methodOrProperty.spelling == "RealToCString") or \
-    (theClass.spelling == "XmlObjMgt" and methodOrProperty.spelling == "GetInteger") or \
-    (theClass.spelling == "NCollection_IndexedDataMap" and methodOrProperty.spelling == "FindFromKey") or \
-    (theClass.spelling == "XmlObjMgt" and methodOrProperty.spelling == "GetReal") or \
-    (theClass.spelling == "BOPAlgo_Tools" and methodOrProperty.spelling == "PerformCommonBlocks") or \
-    (theClass.spelling == "Transfer_Finder" and methodOrProperty.spelling == "GetStringAttribute") or \
-    (theClass.spelling == "MoniTool_TypedValue" and methodOrProperty.spelling == "Internals") or \
-    (theClass.spelling == "MoniTool_AttrList" and methodOrProperty.spelling == "GetStringAttribute") or \
-    (theClass.spelling == "MoniTool_CaseData" and methodOrProperty.spelling == "Text") or \
-    (theClass.spelling == "StepData_StepReaderData" and methodOrProperty.spelling == "ReadEnumParam") or \
-    (theClass.spelling == "XSControl_Vars") or \
-    (theClass.spelling == "MeshVS_DataSource" and methodOrProperty.spelling == "GetGroup"):
+    (theClass.name == "Resource_Unicode") or \
+    (theClass.name == "NCollection_DataMap" and methodOrProperty.name == "Find") or \
+    (theClass.name == "OSD_Thread" and methodOrProperty.name == "Wait") or \
+    (theClass.name == "TCollection_ExtendedString" and methodOrProperty.name == "ToUTF8CString") or \
+    (theClass.name == "Message" and methodOrProperty.name == "ToOSDMetric") or \
+    (theClass.name == "OSD" and methodOrProperty.name == "RealToCString") or \
+    (theClass.name == "XmlObjMgt" and methodOrProperty.name == "GetInteger") or \
+    (theClass.name == "NCollection_IndexedDataMap" and methodOrProperty.name == "FindFromKey") or \
+    (theClass.name == "XmlObjMgt" and methodOrProperty.name == "GetReal") or \
+    (theClass.name == "BOPAlgo_Tools" and methodOrProperty.name == "PerformCommonBlocks") or \
+    (theClass.name == "Transfer_Finder" and methodOrProperty.name == "GetStringAttribute") or \
+    (theClass.name == "MoniTool_TypedValue" and methodOrProperty.name == "Internals") or \
+    (theClass.name == "MoniTool_AttrList" and methodOrProperty.name == "GetStringAttribute") or \
+    (theClass.name == "MoniTool_CaseData" and methodOrProperty.name == "Text") or \
+    (theClass.name == "StepData_StepReaderData" and methodOrProperty.name == "ReadEnumParam") or \
+    (theClass.name == "XSControl_Vars") or \
+    (theClass.name == "MeshVS_DataSource" and methodOrProperty.name == "GetGroup"):
     return False
 
   # Error during build
   # error: static_assert failed due to requirement '!std::is_pointer<void (*)(Graphic3d_CView *)>::value' "Implicitly binding raw pointers is illegal.  Specify allow_raw_pointer<arg<?>>"
-  if theClass.spelling == "Graphic3d_GraduatedTrihedron" and methodOrProperty.spelling == "CubicAxesCallback":
+  if theClass.name == "Graphic3d_GraduatedTrihedron" and methodOrProperty.name == "CubicAxesCallback":
     return False
 
   # Error during build: error: address of bit-field requested
-  if theClass.type.spelling == "MeshVS_TwoColors":
+  if str(theClass) == "MeshVS_TwoColors":
     return False
   
   # Error during build: error: address of bit-field requested
   if (
-    theClass.spelling == "Graphic3d_CStructure" and
-    methodOrProperty.spelling in [
+    theClass.name == "Graphic3d_CStructure" and
+    methodOrProperty.name in [
       "IsInfinite",
       "stick",
       "highlight",
@@ -124,130 +118,120 @@ def filterMethodOrProperty(theClass, methodOrProperty):
   ):
     return False
 
-  if methodOrProperty.access_specifier == clang.cindex.AccessSpecifier.PUBLIC and methodOrProperty.kind == clang.cindex.CursorKind.USING_DECLARATION:
-    print("Using declarations are not supported! (" + theClass.spelling + ", " + methodOrProperty.spelling + ")")
-    return False
-
-  if (
-    methodOrProperty.result_type.spelling.startswith("Standard_OStream") or
-    methodOrProperty.type.spelling == "std::ifstream"
-  ):
-    return False
-
   # error: call to implicitly-deleted copy constructor of 'Aspect_VKeySet'
   # error: rvalue reference to type 'Aspect_VKeySet' cannot bind to lvalue of type 'Aspect_VKeySet'
   # error: call to implicitly-deleted copy constructor of 'Aspect_VKeySet'
   if (
-    theClass.spelling == "AIS_ViewController" and (
-      methodOrProperty.spelling == "Keys" or
-      methodOrProperty.spelling == "ChangeKeys"
+    theClass.name == "AIS_ViewController" and (
+      methodOrProperty.name == "Keys" or
+      methodOrProperty.name == "ChangeKeys"
     )
   ) or (
-    theClass.spelling == "Aspect_WindowInputListener" and (
-      methodOrProperty.spelling == "Keys" or
-      methodOrProperty.spelling == "ChangeKeys"
+    theClass.name == "Aspect_WindowInputListener" and (
+      methodOrProperty.name == "Keys" or
+      methodOrProperty.name == "ChangeKeys"
     )
   ):
     return False
 
   # error: private copy constructor used in this function
-  if theClass.spelling == "BRepClass3d_SolidExplorer" and methodOrProperty.spelling == "GetTree":
+  if theClass.name == "BRepClass3d_SolidExplorer" and methodOrProperty.name == "GetTree":
     return False
 
   # Error comes in the binding code for "gp_TrsfNLerp", which is a template specialization of "NCollection_Lerp"
   # error: type name requires a specifier or qualifier
   # error: cannot cast from type 'void (NCollection_Lerp<gp_Trsf>::*)(double, gp_Trsf &) const' to pointer type 'gp_Trsf (*)(const gp_Trsf &, const gp_Trsf &, double)'
-  if theClass.spelling == "NCollection_Lerp" and methodOrProperty.spelling == "Interpolate" and methodOrProperty.is_static_method():
+  if theClass.name == "NCollection_Lerp" and methodOrProperty.name == "Interpolate" and methodOrProperty.has_static:
     return False
 
   # causes extreme memory growth which fails the build (see corresponding typedef filter)
-  if theClass.spelling in ["NCollection_Sequence", "NCollection_List"] and "::Iterator" in methodOrProperty.displayname:
+  if theClass.name in ["NCollection_Sequence", "NCollection_List"] and "::Iterator" in methodOrProperty.displayname:
     return False
 
   # Creates error during instantiation:
   # Uncaught (in promise) RuntimeError: abort(Assertion failed: bad export type for `_ZNK19Geom2dHatch_Hatcher6IsDoneEv`: undefined). Build with -s ASSERTIONS=1 for more info.
   # Seems like ::isDone() is not defined anywhere
-  if theClass.spelling == "Geom2dHatch_Hatcher" and methodOrProperty.spelling == "IsDone":
+  if theClass.name == "Geom2dHatch_Hatcher" and methodOrProperty.name == "IsDone":
     return False
 
   # Creates error during instantiation:
   # Uncaught (in promise) RuntimeError: abort(Assertion failed: bad export type for `_ZN21Geom2dAPI_Interpolate13ClearTangentsEv`: undefined). Build with -s ASSERTIONS=1 for more info.
-  if theClass.spelling == "Geom2dAPI_Interpolate" and methodOrProperty.spelling == "ClearTangents":
+  if theClass.name == "Geom2dAPI_Interpolate" and methodOrProperty.name == "ClearTangents":
     return False
 
   # Creates error during instantiation:
   # Uncaught (in promise) RuntimeError: abort(Assertion failed: bad export type for `_ZNK21Geom2dGcc_Lin2dTanObl11IsParallel2Ev`: undefined). Build with -s ASSERTIONS=1 for more info.
-  if theClass.spelling == "Geom2dGcc_Lin2dTanObl" and methodOrProperty.spelling == "IsParallel2":
+  if theClass.name == "Geom2dGcc_Lin2dTanObl" and methodOrProperty.name == "IsParallel2":
     return False
 
   # Creates error during instantiation:
   # Uncaught (in promise) RuntimeError: abort(Assertion failed: bad export type for `_ZN25Geom2dInt_Geom2dCurveTool11IsCompositeERK17Adaptor2d_Curve2d`: undefined). Build with -s ASSERTIONS=1 for more info.
-  if theClass.spelling == "Geom2dInt_Geom2dCurveTool" and methodOrProperty.spelling == "IsComposite":
+  if theClass.name == "Geom2dInt_Geom2dCurveTool" and methodOrProperty.name == "IsComposite":
     return False
 
   # Creates error during instantiation:
   # Uncaught (in promise) RuntimeError: abort(Assertion failed: bad export type for `_ZN46Geom2dInt_TheCurveLocatorOfTheProjPCurOfGInter6LocateERK17Adaptor2d_Curve2dS2_iiR17Extrema_POnCurv2dS4_`: undefined). Build with -s ASSERTIONS=1 for more info.
-  if theClass.spelling == "Geom2dInt_TheCurveLocatorOfTheProjPCurOfGInter" and methodOrProperty.spelling == "Locate":
+  if theClass.name == "Geom2dInt_TheCurveLocatorOfTheProjPCurOfGInter" and methodOrProperty.name == "Locate":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomInt_IntSS" and methodOrProperty.spelling == "SetTolFixTangents":
+  if theClass.name == "GeomInt_IntSS" and methodOrProperty.name == "SetTolFixTangents":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomInt_IntSS" and methodOrProperty.spelling == "TolFixTangents":
+  if theClass.name == "GeomInt_IntSS" and methodOrProperty.name == "TolFixTangents":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomAPI_Interpolate" and methodOrProperty.spelling == "ClearTangents":
+  if theClass.name == "GeomAPI_Interpolate" and methodOrProperty.name == "ClearTangents":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomFill_FunctionGuide" and methodOrProperty.spelling == "Deriv2T":
+  if theClass.name == "GeomFill_FunctionGuide" and methodOrProperty.name == "Deriv2T":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomFill_SweepSectionGenerator" and methodOrProperty.spelling == "Init":
+  if theClass.name == "GeomFill_SweepSectionGenerator" and methodOrProperty.name == "Init":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomInt_ResConstraintOfMyGradientOfTheComputeLineBezierOfWLApprox" and methodOrProperty.spelling == "Error":
+  if theClass.name == "GeomInt_ResConstraintOfMyGradientOfTheComputeLineBezierOfWLApprox" and methodOrProperty.name == "Error":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomInt_ResConstraintOfMyGradientbisOfTheComputeLineOfWLApprox" and methodOrProperty.spelling == "Error":
+  if theClass.name == "GeomInt_ResConstraintOfMyGradientbisOfTheComputeLineOfWLApprox" and methodOrProperty.name == "Error":
     return False
 
   # Creates error during instantiation:
   # see above
-  if theClass.spelling == "GeomInt_WLApprox" and methodOrProperty.spelling == "Perform":
+  if theClass.name == "GeomInt_WLApprox" and methodOrProperty.name == "Perform":
     return False
 
   # error: no matching constructor for initialization of 'Extrema_ExtCC'
-  if theClass.spelling in [
+  if theClass.name in [
     "GeomAPI_ExtremaCurveSurface",
     "GeomAPI_ExtremaCurveCurve"
-   ] and methodOrProperty.spelling == "Extrema":
+   ] and methodOrProperty.name == "Extrema":
     return False
 
   # error: call to implicitly-deleted copy constructor of 'Extrema_ExtPS'
-  if theClass.spelling == "GeomAPI_ProjectPointOnSurf" and methodOrProperty.spelling == "Extrema":
+  if theClass.name == "GeomAPI_ProjectPointOnSurf" and methodOrProperty.name == "Extrema":
     return False
 
   # error: no matching function for call to 'select_overload'
-  if theClass.spelling == "Select3D_SensitiveTriangulation" and methodOrProperty.spelling == "LastDetectedTriangle":
+  if theClass.name == "Select3D_SensitiveTriangulation" and methodOrProperty.name == "LastDetectedTriangle":
     return False
 
   # error: call to implicitly-deleted copy constructor of 'IntTools_FClass2d'
   # error: call to implicitly-deleted copy constructor of 'BRepClass3d_SolidClassifier'
-  if theClass.spelling == "IntTools_Context" and methodOrProperty.spelling in [
+  if theClass.name == "IntTools_Context" and methodOrProperty.name in [
     "FClass2d",
     "ProjPS",
     "SolidClassifier"
@@ -255,32 +239,28 @@ def filterMethodOrProperty(theClass, methodOrProperty):
     return False
 
   # error: call to implicitly-deleted copy constructor of 'std::__2::basic_stringstream<char, std::__2::char_traits<char>, std::__2::allocator<char>>'
-  if theClass.spelling == "Message_AttributeStream" and methodOrProperty.spelling == "Stream":
+  if theClass.name == "Message_AttributeStream" and methodOrProperty.name == "Stream":
     return False
 
   # error: calling a private constructor of class 'OpenGl_Clipping'
-  if theClass.spelling == "OpenGl_Context" and methodOrProperty.spelling in [
+  if theClass.name == "OpenGl_Context" and methodOrProperty.name in [
     "ChangeClipping",
     "Clipping",
   ]:
     return False
 
-  # many errors
-  if theClass.spelling == "OpenGl_GlFunctions" and methodOrProperty.kind == clang.cindex.CursorKind.FIELD_DECL:
-    return False
-
-  if theClass.spelling == "OpenGl_GraphicDriver" and methodOrProperty.spelling in [
+  if theClass.name == "OpenGl_GraphicDriver" and methodOrProperty.name in [
     "Options",
     "ChangeOptions",
   ]:
     return False
 
   # wasm-ld: error: /opencascade.js/build/bindings/OpenGl/OpenGl_ShaderProgram.hxx/OpenGl_ShaderProgram.cpp.o: undefined symbol: OpenGl_ShaderProgram::compileShaderVerbose(opencascade::handle<OpenGl_Context> const&, opencascade::handle<OpenGl_ShaderObject> const&, TCollection_AsciiString const&, bool)
-  if theClass.spelling == "OpenGl_ShaderProgram" and methodOrProperty.spelling == "compileShaderVerbose":
+  if theClass.name == "OpenGl_ShaderProgram" and methodOrProperty.name == "compileShaderVerbose":
     return False
 
   # wasm-ld: error: /opencascade.js/build/bindings/OpenGl/OpenGl_View.hxx/OpenGl_View.cpp.o: undefined symbol: OpenGl_View::SetTextureEnv(opencascade::handle<OpenGl_Context> const&, opencascade::handle<Graphic3d_TextureEnv> const&)
-  if theClass.spelling == "OpenGl_View" and methodOrProperty.spelling in [
+  if theClass.name == "OpenGl_View" and methodOrProperty.name in [
     "SetTextureEnv",
     "SetBackgroundTextureStyle",
     "SetBackgroundGradient",
@@ -291,20 +271,13 @@ def filterMethodOrProperty(theClass, methodOrProperty):
   # error: call to 'abs' is ambiguous
   if (
     (
-      theClass.spelling == "NCollection_Vec2" or
-      theClass.spelling == "NCollection_Vec3" or
-      theClass.spelling == "NCollection_Vec4"
+      theClass.name == "NCollection_Vec2" or
+      theClass.name == "NCollection_Vec3" or
+      theClass.name == "NCollection_Vec4"
     ) and
-    methodOrProperty.spelling == "cwiseAbs"
+    methodOrProperty.name == "cwiseAbs"
   ):
     return False
 
-  # error: undefined symbol: _ZN21XCAFDoc_GeomToleranceC2ERKN11opencascade6handleIS_EE (referenced by top-level compiled C/C++ code)
-  if (
-    theClass.spelling == "XCAFDoc_GeomTolerance" and
-    methodOrProperty.kind == clang.cindex.CursorKind.CONSTRUCTOR and
-    methodOrProperty.type.spelling == "void (const opencascade::handle<XCAFDoc_GeomTolerance> &)"
-  ):
-    return False
 
   return True

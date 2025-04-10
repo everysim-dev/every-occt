@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 from Common import ocIncludePaths, additionalIncludePaths
 from plumbum import local
@@ -18,32 +17,22 @@ from rich.progress import (
     MofNCompleteColumn,
 )
 from Common import console
+from joblib import delayed, Parallel
 
 LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
 
-def buildOneFile(args, item, debug=False):
-    if not os.path.exists(f"{item}.o"):
-        try:
-            emcc = local["ccache"]["emcc"][
-                *buildOptions,
-                args["threading"] == "multi-threaded" and "-pthread" or "",
-                *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
-                "-c",
-                item,
-                "-o",
-                f"{item}.o",
-            ]
+def buildOneFile(args, item):
+    emcc = local["ccache"]["emcc"][
+        *buildOptions,
+        args["threading"] == "multi-threaded" and "-pthread" or "",
+        *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
+        "-c",
+        item,
+        "-o",
+        f"{item}.o",
+    ]
 
-            console.print(f"building {item}")
-            result = emcc()
-            return (item, result)
-        except Exception as e:
-            console.print_exception(max_frames=0)
-            console.print(f"failed to build {item}")
-            return (item, None)
-    else:
-        console.print(f"file {item}.o already exists, skipping")
-        return (item, None)
+    return emcc()
 
 
 def compileCustomCodeBindings(args, file="myMain.h"):
@@ -73,19 +62,28 @@ def compileCustomCodeBindings(args, file="myMain.h"):
         console=console,
     ) as progress:
         task_id = progress.add_task("Compiling", total=len(filesToBuild))
-        with ProcessPoolExecutor() as executor:
-            futures = [
-                executor.submit(buildOneFile, args, item)
-                for item in sorted(filesToBuild)
-            ]
-            for future in as_completed(futures):
-                item, result = future.result()
-                if result is not None:
-                    progress.update(task_id, description=f"Building {item}", advance=1)
-                else:
-                    progress.update(
-                        task_id, description=f"Skipped or Failed {item}", advance=1
-                    )
+
+        func = delayed(buildOneFile)
+        parallel = Parallel(n_jobs=-1, backend="threading")
+        futures = []
+
+        target = sorted(filesToBuild)
+
+        for item in target:
+            if not os.path.exists(f"{item}.o"):
+                futures.append(func(args, item))
+            else:
+                console.print(f"file {item}.o already exists, skipping")
+
+        results = parallel(futures)
+
+        for item, result in zip(target, results):
+            if result is not None:
+                progress.update(task_id, description=f"Building {item}", advance=1)
+            else:
+                progress.update(
+                    task_id, description=f"Skipped or Failed {item}", advance=1
+                )
 
 
 if __name__ == "__main__":
