@@ -1,3 +1,4 @@
+import tempfile
 from filter.filterIncludeFiles import filterIncludeFile
 from typing import Set
 from rich.console import Console
@@ -17,6 +18,10 @@ def getGlobalIncludes() -> list[list[str]]:
                 includeFiles.append(str(os.path.join(dirpath, item)))
     return [includeFiles, additionalIncludePaths]
 
+
+TMP_DIR = tempfile.gettempdir()
+HEADER_NAME = "myMain"
+HEADER_PATH = os.path.join(TMP_DIR, f"{HEADER_NAME}.h")
 
 [ocIncludeFiles, ocIncludePaths] = getGlobalIncludes()
 
@@ -38,6 +43,7 @@ includePathArgs = (
         )
     )
     + list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths))
+    + [f"-I {TMP_DIR}"]
 )
 
 buildOptions = [
@@ -55,3 +61,4 @@ buildOptions = [
     # "-std=c++20",
     "-Os",
 ]
+

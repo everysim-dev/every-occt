@@ -23,6 +23,7 @@ rmrf = local["rm"]["-rf"]
 
 buildConfig = yaml.safe_load(open(args.filename, "r"))
 schema = eval(open("/opencascade.js/src/customBuildSchema.py", "r").read())
+
 v = Validator(schema)
 if not v.validate(buildConfig, schema):
   raise Exception(v.errors)
@@ -43,9 +44,12 @@ def verifyBinding(binding) -> bool:
   return False
 
 def verifyBindings(bindings) -> bool:
+  fails = []
   for binding in bindings:
     if not verifyBinding(binding):
-      raise Exception(f"Requested binding {json.dumps(binding)} does not exist!")
+      fails.append(binding)
+  if fails:
+    raise Exception(f"Requested binding {json.dumps(fails)} does not exist!")
 
 verifyBindings(buildConfig["mainBuild"]["bindings"])
 for extraBuild in buildConfig["extraBuilds"]:

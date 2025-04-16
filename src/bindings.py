@@ -1,19 +1,18 @@
-# import clang.cindex 제거됨
 from pygccxml import declarations
-import re
 
 from wasmGenerator.Common import (
     SkipException,
     getPublicMemberFunctions,
     isAbstractClass,
     getMethodOverloadPostfix,
-    unwrap_type,
+    unwrapType,
 )
-from filter.filterClasses import filterClass
-from filter.filterMethodOrProperties import filterMethodOrProperty
 from Common import console
 from typing import Union, Optional, Dict
 from typing import Optional
+from typeguard import typechecked
+from pygccxml import declarations
+import re
 
 
 def merge(sep: str, *strings: str) -> str:
@@ -34,14 +33,6 @@ def pickWrap(condition: bool, wrapStart: list[str], center: str, wrapEnd: list[s
 
 def indent(level: int):
     return " " * level * 2
-
-
-def shouldProcessClass(decl: declarations.declaration_t):
-    # 네임스페이스는 무시
-    if isinstance(decl, declarations.namespace_t):
-        return False
-
-    return True
 
 
 builtInTypes = [  # according to https://en.cppreference.com/w/cpp/language/types
@@ -85,13 +76,6 @@ builtInTypes = [  # according to https://en.cppreference.com/w/cpp/language/type
     "long double",
 ]
 
-cStringTypes = [
-    "const char *",
-    "const char *const",
-    "char *",
-    "char *const",
-]
-
 special_template_types = [
     "NCollection_LocalArray",
     "NCollection_Sequence",
@@ -103,11 +87,10 @@ special_template_types = [
 ]
 
 
-def isCString(type_obj):
-    return str(type_obj).strip() in cStringTypes
-
-
-from pygccxml import parser, declarations
+def isCString(type_obj: Union[declarations.declaration_t]):
+    return isinstance(type_obj, declarations.pointer_t) and "char" in str(
+        unwrapType(type_obj)
+    )
 
 
 def get_canonical(decl: declarations.declaration_t) -> declarations.declaration_t:
@@ -118,7 +101,8 @@ def get_canonical(decl: declarations.declaration_t) -> declarations.declaration_
     return result
 
 
-def get_class_type_name_pygccxml(decl):
+@typechecked
+def getClassName(decl: declarations.class_t) -> str:
     """
     pygccxml class_t로부터 네임스페이스 포함 클래스 이름 반환
     """
@@ -127,6 +111,11 @@ def get_class_type_name_pygccxml(decl):
     if hasattr(decl, "name"):
         return decl.name
     return str(decl)
+
+
+def make_bindings_identifier(name: str) -> str:
+    # <, >, ,, 공백 등 템플릿 관련 문자를 _로 치환
+    return re.sub(r"[<>,\s]", "_", name).replace("__", "_").strip("_")
 
 
 def get_fully_qualified_type_name_pygccxml(
@@ -192,18 +181,24 @@ def safe_type_name(
 
 
 class Bindings:
-    def processClass(
+    pass
+
+
+class EmbindBindings(Bindings):
+    def processClassInner(
         self,
         theClass: declarations.class_t,
         templateDecl: Optional[declarations.typedef_t] = None,
         templateArgs: Optional[
             Dict[str, Union[declarations.type_t, declarations.declaration_t]]
         ] = None,
+        className: str = None,
     ) -> str:
         output = ""
-        className = getClassTypeName(theClass, templateDecl)
-        if className == "":
-            className = theClass.related_class.declaration
+
+        if not className:
+            className = getClassTypeName(theClass, templateDecl)
+
         isAbstract = isAbstractClass(theClass)
 
         if not isAbstract:
@@ -213,21 +208,21 @@ class Bindings:
             method: declarations.member_function_t
 
             try:
-                output += self.processMethodOrProperty(theClass, method, templateDecl)
+                output += self.processMethodOrProperty(
+                    theClass, method, className=className
+                )
             except SkipException as e:
                 console.print(str(e))
         output += self.processFinalizeClass()
         if not isAbstract:
             try:
                 output += self.processOverloadedConstructors(
-                    theClass, None, templateDecl, templateArgs
+                    theClass, None, templateDecl, templateArgs, className=className
                 )
             except SkipException as e:
                 console.print(str(e))
         return output
 
-
-class EmbindBindings(Bindings):
     def processClass(
         self,
         theClass: declarations.class_t,
@@ -236,8 +231,9 @@ class EmbindBindings(Bindings):
         className=None,
     ):
         output = ""
+
         if className is None:
-            className = get_class_type_name_pygccxml(theClass)
+            className = getClassName(theClass)
 
         if className.startswith("::"):
             className = className[2:]
@@ -245,17 +241,15 @@ class EmbindBindings(Bindings):
         tokens = className.split("::")
         lastToken = tokens[-1]
 
+        bindings_name = make_bindings_identifier(lastToken)
         output += (
-            f"EMSCRIPTEN_BINDINGS({lastToken}) {{\n"
+            f"EMSCRIPTEN_BINDINGS({bindings_name}) {{\n"
+            + f'  class_<{className}>("{lastToken}")\n'
+            + self.processClassInner(
+                theClass, templateDecl, templateArgs, className=className
+            )
+            + "}\n\n"
         )
-
-        output += (
-            f'  class_<{className}>("{lastToken}")\n'
-        )
-
-        output += super().processClass(theClass, templateDecl, templateArgs)
-
-        output += "}\n\n"
 
         decls = list(theClass.declarations)
 
@@ -276,7 +270,7 @@ class EmbindBindings(Bindings):
             is not None
         )
         if nonPublicDestructor or placementDelete:
-            output += f"namespace emscripten {{ namespace internal {{ template<> void raw_destructor<{lastToken}>({lastToken}* ptr) {{ /* do nothing */ }} }} }}\n"
+            output += f"namespace emscripten {{ namespace internal {{ template<> void raw_destructor<{className}>({className}* ptr) {{ /* do nothing */ }} }} }}\n"
         return output
 
     def processFinalizeClass(self):
@@ -284,6 +278,9 @@ class EmbindBindings(Bindings):
 
     def processSimpleConstructor(self, theClass: declarations.class_t) -> str:
         output = ""
+
+        if theClass.name.startswith('NCollection_'):
+            return output
 
         constructors = []
 
@@ -297,8 +294,7 @@ class EmbindBindings(Bindings):
         ]
 
         if len(publicConstructors) == 0:
-            output += "    .constructor<>()\n"
-            return output
+            return ""
 
         if len(publicConstructors) != 1:
             return output
@@ -307,9 +303,6 @@ class EmbindBindings(Bindings):
 
         def argTypeToString(arg: declarations.argument_t):
             result = f"{arg.decl_type.decl_string}"
-
-            if arg.default_value:
-                result += f" = {arg.default_value}"
 
             if result.startswith("::"):
                 result = result[2:]
@@ -328,91 +321,176 @@ class EmbindBindings(Bindings):
         output += "    .constructor<" + argTypesBindings + ">()\n"
         return output
 
-    def getSingleArgumentBinding(self, argNames=True):
-        def f(arg: declarations.argument_t):
-            argBinding = ""
-            changed = False
-
-            typename = get_fully_qualified_type_name_pygccxml(arg)
-
-            argBinding = typename + ((" " + arg.name) if argNames else "")
-
-            return [argBinding, changed]
-
-        return f
-
+    @typechecked
     def processMethodOrProperty(
         self,
         theClass: declarations.class_t,
         method: declarations.member_function_t,
-        templateDecl: Optional[declarations.typedef_t] = None,
+        className: str = None,
     ) -> str:
         output = ""
-        className = get_class_type_name_pygccxml(theClass)
+
+        if method.has_inline:
+            return ""
+
+        if not className:
+            className = getClassName(theClass)
+
         [overloadPostfix, numOverloads] = getMethodOverloadPostfix(theClass, method)
+
+        # 여러 함수 포인터 인자(static 함수) 바인딩: 제너럴 trampoline 활용
+        funcptr_indices = []
+        funcptr_types = []
+        funcptr_tramp_templates = []
+        for idx, arg in enumerate(method.arguments):
+            t = arg.decl_type
+            if isinstance(t, declarations.pointer_t) and isinstance(
+                t.base, declarations.calldef_type_t
+            ):
+                funcptr_indices.append(idx)
+                funcptr_types.append(t)
+                tramp_args = [safe_type_name(p) for p in t.base.arguments_types]
+                funcptr_tramp_templates.append(
+                    f"GenericFunctionPointerTrampoline<int, {', '.join(tramp_args)}>"
+                )
+        has_funcptr_arg = len(funcptr_indices) > 0
+
+        # TODO 완성 필요
+        if has_funcptr_arg and method.has_static:
+            func_name = method.name
+            wrapper_func_name = f"{func_name}_js"
+            # 인자 선언부 및 호출 인자 생성
+            arg_decls = []
+            call_args = []
+            for i, arg in enumerate(method.arguments):
+                t = arg.decl_type
+                if i in funcptr_indices:
+                    arg_decls.append(f"emscripten::val arg{i}")
+                    tramp_idx = funcptr_indices.index(i)
+                    call_args.append(
+                        f"{funcptr_tramp_templates[tramp_idx]}::get(arg{i})"
+                    )
+                else:
+                    arg_decls.append(f"{safe_type_name(t)} {arg.name}")
+                    call_args.append(arg.name)
+            arg_decl_str = ", ".join(arg_decls)
+            call_arg_str = ", ".join(call_args)
+            ret_type = safe_type_name(method.return_type)
+            wrapper = (
+                f"\nstatic {ret_type} {wrapper_func_name}({arg_decl_str}) {{\n"
+                + f"    return {className}::{func_name}({call_arg_str});\n"
+                + "}\n"
+            )
+            return output
+            output = wrapper + output
+            output += f'{indent(2)}.class_function("{func_name}{overloadPostfix}", &{wrapper_func_name}, allow_raw_pointers())\n'
+            return output
 
         for type in method.argument_types:
             if isinstance(type, declarations.reference_t):
                 type = type.base
-            
+
+            # print(unwrapType(type), unwrapType(type).__class__.__name__)
+
             # 스트림 타입 임시 비활성화
             # TODO: 스트림 타입을 처리할 수 있는 방법을 찾아야 함
             if any(
-                term in unwrap_type(type).decl_string
-                for term in ["ostream", "istream", "fstream", "ssteam"]
+                term in unwrapType(type).decl_string
+                for term in ["AVStream", "ostream", "istream", "fstream", "ssteam"]
             ):
                 return ""
 
-
-        def needsWrapper(type: Union[declarations.argument_t, declarations.type_t, declarations.declarated_t, declarations.void_t]):
-            # C 문자열 포인터는 항상 래핑 필요
-            if isinstance(type, declarations.pointer_t) and isCString(type):
-                return True
-            
-            decl_type = type.decl_type if hasattr(type, "decl_type") else type
+        @typechecked
+        def needsWrapper(
+            type: Union[
+                declarations.type_t, declarations.declaration_t, declarations.argument_t
+            ],
+        ):
+            unwrapedType = unwrapType(type, withBase=False)
+            baseType = unwrapType(type)
 
             # LValueReference가 아니면 래핑 필요 없음
-            if not isinstance(decl_type, declarations.reference_t):
+            if not isinstance(unwrapedType, declarations.reference_t):
                 return False
-
-            pointee: Union[declarations.const_t, declarations.declarated_t] = decl_type.base
+            else:
+                unwrapedType = unwrapType(unwrapedType.base, withBase=False)
 
             # 상수 참조는 래핑 필요 없음 - 데이터 수정 불가
-            if isinstance(pointee, declarations.const_t):
+            if isinstance(unwrapedType, declarations.const_t):
                 return False
-            
-            root_type = unwrap_type(pointee)
+
+            if isinstance(unwrapedType, declarations.pointer_t):
+                return True
+
+            if baseType and isinstance(baseType, declarations.enumeration_t):
+                return True
 
             # 기본 타입(int, float 등)은 래핑 필요
             # 이는 값 변경이 포인터를 통해 전달되어야 하기 때문
-            if isinstance(root_type, declarations.fundamental_t):
+            if isinstance(baseType, declarations.fundamental_t):
                 return True
 
-            # 포인터에 대한 참조는 래핑 필요
-            if isinstance(pointee, declarations.pointer_t):
-                return True
+            return False
 
-            if isinstance(pointee, declarations.enumeration_t):
-                return True
+        # const T& + 복사 생성자 private이면, 람다에서 T* 반환(나머지 래핑 로직은 그대로)
+        def needsConstRefReturnWithPrivateCopyCtor():
+            if not isinstance(method.return_type, declarations.reference_t):
+                return False
 
-            # 때로는 열거형이 ELABORATED로 나올 수 있음
-            if isinstance(pointee, declarations.elaborated_t):
-                underlying_type = pointee.related_class
-                return underlying_type and isinstance(
-                    underlying_type, declarations.enumeration_t
-                )
+            baseType = method.return_type.base
 
-            # 정규화된 타입 확인
-            if isinstance(pointee, declarations.enumeration_t):
-                return True
+            if isinstance(baseType, declarations.declarated_t):
+                baseType = unwrapType(baseType, withBase=False)
+
+            if isinstance(baseType, declarations.const_t):
+                baseType = unwrapType(baseType.base, withBase=False)
+
+            if not isinstance(baseType, declarations.class_t):
+                return False
+
+            ctors = baseType.constructors(allow_empty=True)
+
+            for ctor in ctors:
+                ctor: declarations.constructor_t
+                args = ctor.arguments
+
+                if len(args) != 1:
+                    continue
+
+                if ctor.access_type != "private":
+                    continue
+
+                argType = args[0].decl_type
+
+                if not isinstance(argType, declarations.reference_t):
+                    continue
+
+                argType = argType.base
+
+                if not isinstance(argType, declarations.const_t):
+                    continue
+
+                argType = unwrapType(argType)
+
+                if not isinstance(argType, declarations.class_t):
+                    continue
+
+                if argType.decl_string == baseType.decl_string:
+                    return True
 
             return False
 
         args = list(method.arguments)
         argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg), args))
+        # TODO 추후 복구해야하는지 확인 필요
         returnNeedsWrapper = needsWrapper(method.return_type)
 
-        if any(argsNeedingWrapper) or returnNeedsWrapper:
+        # TODO optional_override 사용하도록 수정해야 할지 알아보기
+        if (
+            any(argsNeedingWrapper)
+            or returnNeedsWrapper
+            or needsConstRefReturnWithPrivateCopyCtor()
+        ):
 
             def replaceTemplateArgs(x: tuple):
                 argIndex = x[0]
@@ -429,7 +507,6 @@ class EmbindBindings(Bindings):
             def getArgTypeName(type: declarations.argument_t):
                 return type.decl_type
 
-            classTypeName = getClassTypeName(theClass, templateDecl)
             wrappedParamTypes = merge(
                 ", ",
                 *map(
@@ -505,8 +582,7 @@ class EmbindBindings(Bindings):
                     if not isCString(args[x[0]]):
                         return f"ref_{getArgName(x)}"
                     elif (
-                        "const"
-                        not in args[x[0]].declaration.base.qualifiers
+                        "const" not in args[x[0]].declaration.base.qualifiers
                         or "const" in args[x[0]].qualifiers
                     ):
                         return f"{getArgName(x)}.isNull() ? nullptr : strdup({getArgName(x)}.as<std::string>().c_str())"
@@ -517,11 +593,25 @@ class EmbindBindings(Bindings):
 
             return_type_obj = method.return_type
 
-            resultTypeSpelling = pick(
-                returnNeedsWrapper,
-                "emscripten::val",
-                safe_type_name(return_type_obj),
-            )
+            # 반환 타입 결정: const T& + 복사 생성자 private이면 const T*, 아니면 기존 로직
+            if needsConstRefReturnWithPrivateCopyCtor():
+                # 람다 반환 타입은 const T*
+                ret_type = method.return_type
+                base_type = (
+                    ret_type.base.base if hasattr(ret_type.base, "base") else None
+                )
+                resultTypeSpelling = (
+                    f"const {base_type.decl_string}*"
+                    if base_type and hasattr(base_type, "decl_string")
+                    else "void*"
+                )
+            else:
+                resultTypeSpelling = pick(
+                    returnNeedsWrapper,
+                    "emscripten::val",
+                    safe_type_name(return_type_obj),
+                )
+
             functionBindingHead = merge(
                 "",
                 "\n",
@@ -534,7 +624,7 @@ class EmbindBindings(Bindings):
                     ],
                     merge(
                         "",
-                        pick(not method.has_static, f"{classTypeName}&", ""),
+                        pick(not method.has_static, f"{className}&", ""),
                         pick(
                             not method.has_static and len(args) > 0,
                             ", ",
@@ -547,7 +637,7 @@ class EmbindBindings(Bindings):
                 merge(
                     "",
                     "[](",
-                    pick(not method.has_static, f"{classTypeName}& that", ""),
+                    pick(not method.has_static, f"{className}& that", ""),
                     pick(not method.has_static and len(args) > 0, ", ", ""),
                     wrappedParamTypesAndNames,
                     ")",
@@ -607,28 +697,33 @@ class EmbindBindings(Bindings):
                         enumerate(argsNeedingWrapper),
                     ),
                 ),
-                pick(
-                    method.return_type.decl_string == "void",
-                    "",
-                    pick(
-                        returnNeedsWrapper,
+                # 반환부: const T& + 복사 생성자 private이면 &ret, 아니면 기존 로직
+                (
+                    f"{indent(4)}return const_cast<{safe_type_name(unwrapType(method.return_type))}*>(&ret);\n"
+                    if needsConstRefReturnWithPrivateCopyCtor()
+                    else pick(
+                        method.return_type.decl_string == "void",
+                        "",
                         pick(
-                            isinstance(method.return_type, declarations.pointer_t),
-                            merge(
-                                "",
-                                indent(4),
-                                "return ret == nullptr ? emscripten::val::null() : emscripten::val(static_cast<",
-                                pick(
-                                    isCString(method.return_type),
-                                    "std::string",
-                                    method.return_type.decl_string,
+                            returnNeedsWrapper,
+                            pick(
+                                isinstance(method.return_type, declarations.pointer_t),
+                                merge(
+                                    "",
+                                    indent(4),
+                                    "return ret == nullptr ? emscripten::val::null() : emscripten::val(static_cast<",
+                                    pick(
+                                        isCString(method.return_type),
+                                        "std::string",
+                                        method.return_type.decl_string,
+                                    ),
+                                    ">(ret));\n",
                                 ),
-                                ">(ret));\n",
+                                f"{indent(4)}return emscripten::val(ret);\n",
                             ),
-                            f"{indent(4)}return emscripten::val(ret);\n",
+                            f"{indent(4)}return ret;\n",
                         ),
-                        f"{indent(4)}return ret;\n",
-                    ),
+                    )
                 ),
             )
             functionBinding = merge(
@@ -639,18 +734,25 @@ class EmbindBindings(Bindings):
                 f"{indent(2)})",
             )
         else:
-            if numOverloads == 1:
+            if False and numOverloads == 1:
                 functionBinding = f" &{className}::{method.name}"
             else:
                 argumentBinding = merge(
                     ", ",
                     *map(
-                        lambda x: self.getSingleArgumentBinding(True)(x)[0],
+                        lambda arg: arg.decl_type.decl_string,
                         list(method.arguments),
                     ),
                 )
+                
+                if "?unknown?" in argumentBinding:
+                    return ""
+                
+                if "?unknown?" in method.return_type.decl_string:
+                    return ""
+
                 constBinding = pick(method.has_const, " const", "")
-                classBinding = pick(not method.has_static,f", {className}","")
+                classBinding = pick(not method.has_static, f", {className}", "")
                 functionBinding = merge(
                     "",
                     f" select_overload<{method.return_type.decl_string}({argumentBinding}){constBinding}{classBinding}>",
@@ -669,45 +771,34 @@ class EmbindBindings(Bindings):
         ):
             if isinstance(method, declarations.array_t):
                 console.print(
-                    "Cannot handle array properties, skipping "
-                    + className
-                    + "::"
-                    + method.name
+                    f"Cannot handle array properties, skipping {className}::{method.name}"
                 )
             elif not (getattr(method, "base", None) is None):
                 console.print(
-                    "Cannot handle pointer properties, skipping "
-                    + className
-                    + "::"
-                    + method.name
+                    f"Cannot handle pointer properties, skipping {className}::{method.name}"
                 )
             else:
                 output += f'{indent(2)}.property("{method.name}", &{className}::{method.name})\n'
         return output
 
+    # TODO 리팩토링 필요
+    # 템플릿 관련된 부분 pygccxml을 통해 해결 가능
     def processOverloadedConstructors(
-        self, theClass, children=None, templateDecl=None, templateArgs=None
+        self,
+        theClass: declarations.class_t,
+        children=None,
+        templateDecl=None,
+        templateArgs=None,
+        className: str = None,
     ):
         output = ""
 
-        # 템플릿이 아닌 클래스는 템플릿 인자 사용하는 생성자 오버로딩 생략
-        is_template_class = (
-            hasattr(theClass, "template_args") and len(theClass.template_args) > 0
-        ) or (
-            hasattr(theClass, "get_num_template_arguments")
-            and theClass.get_num_template_arguments() > 0
-        )
-        if not is_template_class:
-            return ""
-        if children is None:
-            children = list(theClass.declarations)
+        return output
 
-        # 모든 public 생성자 가져오기
         constructors = list(
             filter(
-                lambda x: isinstance(x, declarations.constructor_t)
-                and x.access_type == "public",
-                children,
+                lambda x: x.access_type == "public",
+                theClass.constructors(),
             )
         )
 
@@ -716,12 +807,8 @@ class EmbindBindings(Bindings):
             return output
 
         constructorBindings = ""
-        allOverloads = constructors  # 모든 public 생성자 리스트
 
-        # 바인딩 가능한 생성자 필터링 (filterMethodOrProperty 적용)
-        valid_constructors_for_binding = list(
-            filter(lambda x: filterMethodOrProperty(theClass, x), allOverloads)
-        )
+        valid_constructors_for_binding = constructors
 
         # 바인딩 가능한 생성자가 1개 이하이고, 그 중 인자 없는 생성자가 있다면 오버로딩 불필요
         if len(valid_constructors_for_binding) <= 1 and any(
@@ -730,11 +817,12 @@ class EmbindBindings(Bindings):
             return output
 
         # 템플릿 타입 감지
-        class_name = get_class_type_name_pygccxml(theClass)
-        template_info = detect_template_type_simple(class_name)
+        if not className:
+            className = getClassName(theClass)
+        template_info = detect_template_type_simple(className)
 
         # 생성자 인덱스 매핑 (일관된 이름 부여용)
-        constructor_indices = {con: idx for idx, con in enumerate(allOverloads)}
+        constructor_indices = {con: idx for idx, con in enumerate(constructors)}
 
         name = getClassTypeName(theClass, templateDecl)
 
@@ -765,9 +853,7 @@ class EmbindBindings(Bindings):
             # 각 생성자 인자에 대해 처리
             for x_idx, x in enumerate(constructor_args):
                 # pygccxml용 네임스페이스 포함 완전 수식 타입명 얻기
-                resolved_type_str = get_fully_qualified_type_name_pygccxml(
-                    x.related_class
-                )
+                resolved_type_str = get_fully_qualified_type_name_pygccxml(x)
                 arg_name = x.name if x.name else f"arg{x_idx}"
 
                 # 템플릿 특수 처리가 필요한 경우 타입 오버라이드
@@ -843,12 +929,12 @@ class EmbindBindings(Bindings):
 
             # 헬퍼 구조체 및 Embind 클래스 바인딩 코드 생성
             constructorBindings += (
-                f"{indent(4)}struct {name}{overloadPostfix} : public {name} {{\n" +
-                f"{indent(6)}{name}{overloadPostfix}({args}) : {name}({argNames}) {{}}\n" +
-                f"{indent(4)}}};\n" +
-                f'{indent(4)}class_<{name}{overloadPostfix}, base<{name}>>("{name}{overloadPostfix}")\n' +
-                f"{indent(6)}.constructor<{argTypes}>()\n" +
-                f"{indent(4)};\n"
+                f"{indent(4)}struct {name}{overloadPostfix} : public {name} {{\n"
+                + f"{indent(6)}{name}{overloadPostfix}({args}) : {name}({argNames}) {{}}\n"
+                + f"{indent(4)}}};\n"
+                + f'{indent(4)}class_<{name}{overloadPostfix}, base<{name}>>("{name}{overloadPostfix}")\n'
+                + f"{indent(6)}.constructor<{argTypes}>()\n"
+                + f"{indent(4)};\n"
             )
 
         output += constructorBindings

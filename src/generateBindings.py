@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 
-from typing import Callable
+from typing import Callable, Union
 from bindings import EmbindBindings
 import os
 from wasmGenerator.Common import SkipException
-from Common import ocIncludeFiles, includePathArgs, console
+from Common import ocIncludeFiles, includePathArgs, console, HEADER_NAME, HEADER_PATH
 from plumbum import local
 from pygccxml import parser, declarations, utils
 import tempfile, os
@@ -17,7 +17,7 @@ LIBRARY_BASE_PATH = os.environ.get(
 BUILD_DIRECTORY = os.environ.get("OCJS_BUILD_PATH", "/opencascade.js/build")
 OCCT_SRC_PATH = os.environ.get("OCCT_SRC_PATH", "/occt/src/")
 OCCT_INCLUDE_STATEMENTS = os.linesep.join(
-    map(lambda x: f'#include "{os.path.basename(x)}"', list(sorted(ocIncludeFiles)))
+    map(lambda x: f"#include <{os.path.basename(x)}>", list(sorted(ocIncludeFiles)))
 )
 
 mkdirp = local["mkdir"]["-p"]
@@ -27,11 +27,14 @@ rmrf = local["rm"]["-rf"]
 referenceTypeTemplateDefs = """
 #include <emscripten/bind.h>
 #include <functional>
+#include <type_traits>
 
 using namespace emscripten;
 
+// 일반 타입(T) 전용 (함수 포인터가 아닌 경우)
 template<typename T>
-T getReferenceValue(const emscripten::val& v) {
+typename std::enable_if<!std::is_pointer<T>::value || !std::is_function<typename std::remove_pointer<T>::type>::value, T>::type
+getReferenceValue(const emscripten::val& v) {
   if(!(v.typeOf().as<std::string>() == "object")) {
     return v.as<T>(allow_raw_pointers());
   } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
@@ -40,14 +43,41 @@ T getReferenceValue(const emscripten::val& v) {
   throw("unsupported type");
 }
 
+// 함수 포인터(T = R(*)(Args...)) 전용
 template<typename T>
-void updateReferenceValue(emscripten::val& v, T& val) {
+typename std::enable_if<std::is_pointer<T>::value && std::is_function<typename std::remove_pointer<T>::type>::value, T>::type
+getReferenceValue(const emscripten::val& v) {
+  if (v.typeOf().as<std::string>() == "function") {
+    // 함수 포인터 타입 추론: R(*)(Args...)
+    using FnType = typename std::remove_pointer<T>::type;
+    // trampoline 람다를 heap에 할당하여 함수 포인터로 반환
+    static auto trampoline = [v](auto&&... args) -> decltype(std::declval<FnType>()(args...)) {
+      return v(args...).template as<decltype(std::declval<FnType>()(args...))>();
+    };
+    return reinterpret_cast<T>(&trampoline);
+  }
+  throw("unsupported function pointer type");
+}
+
+template<typename T>
+typename std::enable_if<!std::is_pointer<T>::value || !std::is_function<typename std::remove_pointer<T>::type>::value>::type
+updateReferenceValue(emscripten::val& v, T& val) {
   if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
     v.set("current", val);
   }
 }
 
+// 함수 포인터 타입: 아무 동작도 하지 않음
+template<typename T>
+typename std::enable_if<std::is_pointer<T>::value && std::is_function<typename std::remove_pointer<T>::type>::value>::type
+updateReferenceValue(emscripten::val&, T&) {
+  // 함수 포인터는 업데이트 불가
+}
+
 """
+
+cache = {}
+
 
 @typechecked
 def getClass(decl: declarations.declaration_t) -> declarations.class_t | None:
@@ -67,8 +97,12 @@ def filterCommon(decl: declarations.declaration_t) -> bool:
     if not decl.location:
         return False
 
-    file_name = decl.location.file_name
-    if not file_name or not file_name.startswith(OCCT_SRC_PATH):
+    fileName = decl.location.file_name
+
+    if fileName.endswith(HEADER_PATH):
+        return True
+
+    if not fileName or not fileName.startswith(OCCT_SRC_PATH):
         return False
 
     if isinstance(decl.parent, declarations.class_t):
@@ -80,6 +114,14 @@ def filterCommon(decl: declarations.declaration_t) -> bool:
 @typechecked
 def filterClasses(decl: declarations.declaration_t) -> bool:
     if not isinstance(decl, declarations.class_t):
+        return False
+
+    if isinstance(decl.parent, declarations.class_t) or isinstance(
+        decl.parent, declarations.class_declaration_t
+    ):
+        return False
+
+    if decl.name.startswith("basic_fstream"):
         return False
 
     return True
@@ -101,14 +143,99 @@ def filterEnums(decl: declarations.declaration_t) -> bool:
 
 
 @typechecked
+def processHeaders(decl: declarations.declaration_t):
+    [originalName, childName] = getTypeName(decl)
+
+    includeFiles = set()
+
+    HEADERS = {
+        "BRepFill_TrimShellCorner": ["TopoDS_Vertex"],
+        "AIS_EqualDistanceRelation": ["TopoDS_Vertex", "TopoDS_Edge"],
+        "BOPAlgo_EdgeInfo": ["BOPAlgo_WireSplitter", "TopTools_ListOfShape"],
+        "IVtkDraw": ["Graphic3d_Vec2"],
+        "IntPolyh_VectorOfType": ["IntPolyh_Edge"],
+        "NCollection_IndexedDataMap": ["Graphic3d_CLight"],
+        "NCollection_DoubleMap": ["XCAFPrs_Style"],
+        "BRepBlend_ConstThroatWithPenetrationInv": ["math_Matrix"],
+        "BRepBlend_Chamfer": ["math_Matrix"],
+        "BRepBlend_ConstThroatInv": ["math_Matrix"],
+        "BRepBlend_ConstThroatWithPenetration": ["math_Matrix"],
+        "BRepBlend_ConstRad": ["Blend_Point"],
+        "NCollection_CellFilter": ["BRepMesh_CircleInspector"],
+    }
+
+    REQUIRED_HEADERS = [
+        "TopoDS_Shape",
+        "Adaptor2d_Curve2d",
+        "BOPDS_PaveBlock",
+        "Standard_TypeDef",
+        "BRepGProp_Face",
+        "BRepGProp_Domain",
+        "gp",
+        "math_Matrix",  # BRep
+    ]
+    defaultHeaders = HEADERS[childName] if childName in HEADERS else []
+
+    headers = [
+        f"{header}.hxx"
+        for header in [
+            *REQUIRED_HEADERS,
+            *defaultHeaders,
+        ]
+    ]
+
+    includeFiles.update(headers)
+
+    aliases = getattr(decl, "aliases", [])
+
+    targets = [decl, *filter(lambda a: a.name not in ("base_type"), aliases)]
+
+    if isinstance(decl, declarations.class_t):
+        for method in decl.member_functions(allow_empty=True):
+            method: declarations.member_function_t
+
+            if method.access_type != "public":
+                continue
+
+            targets.append(method)
+            targets.append(method.return_type)
+
+            for argType in method.argument_types:
+                targets.append(argType)
+
+    for target in targets:
+        founds = getIncludeFiles(target)
+
+        if founds:
+            includeFiles.update(founds)
+
+    # Standard가 가장 먼저 include되고 TopoDS가 그 다음으로 include 되어야 함.
+    # 모든 정렬 기준을 순차적으로 적용
+    includeFiles = sorted(
+        includeFiles,
+        key=lambda x: (
+            not x.startswith("Standard_"),
+            not x.startswith("TopoDS_"),
+            all(map(lambda h: not x.startswith(h), REQUIRED_HEADERS)),
+            x,
+        ),
+    )
+
+    return "\n".join(
+        map(
+            lambda x: f'#include "{x}"' if x == f"{HEADER_NAME}.h" else f"#include <{x}>",
+            includeFiles,
+        )
+    )
+
+
+@typechecked
 def processChild(
     decl: declarations.declaration_t,
     buildType: str,
     extension: str,
     processFunction: Callable[..., str],
-    preamble: str,
 ) -> None:
-    # pygccxml declaration용 이름
     [originalName, childName] = getTypeName(decl)
 
     file_path = None
@@ -125,6 +252,10 @@ def processChild(
     mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
     filename = f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{childName}{extension}"
 
+    includes = processHeaders(decl)
+
+    preamble = f"{includes}\n{referenceTypeTemplateDefs}"
+
     if not os.path.exists(filename):
         try:
             output = processFunction(preamble, decl)
@@ -136,8 +267,6 @@ def processChild(
         except Exception as e:
             console.print_exception(show_locals=False)
             raise e
-    else:
-        console.print(f"file {childName}.cpp already exists, skipping")
 
 
 @typechecked
@@ -147,7 +276,9 @@ def strip_template_params(full_name: str) -> str:
 
 
 @typechecked
-def getTypeName(decl: declarations.declaration_t) -> list[str]:
+def getTypeName(
+    decl: Union[declarations.declaration_t, declarations.cpptypes.type_t],
+) -> list[str]:
     name = ""
 
     if hasattr(decl, "base"):
@@ -170,14 +301,25 @@ def processChildren(
     ns: declarations.namespace_t,
     buildType: str,
     extension: str,
-    preamble: str,
 ) -> None:
     children = (
-        list(ns.declarations)
-        + list(ns.classes())
+        list(ns.typedefs())
         + list(ns.enumerations())
-        + list(ns.typedefs())
+        + list(ns.declarations)
+        + list(ns.classes())
     )
+
+    console.print(f"Children length is {len(children)}")
+
+    for child in children:
+        [originalName, partialName] = getTypeName(child)
+
+        if originalName not in cache:
+            cache[originalName] = []
+
+        cache[originalName].append(child)
+
+    console.print(f"Completed caching")
 
     futures = []
     parallel = Parallel(n_jobs=-1, backend="threading")
@@ -185,13 +327,23 @@ def processChildren(
     processed = set()
 
     for child in children:
+        [originalName, childName] = getTypeName(child)
+    
         if not filterCommon(child):
             continue
 
-        [originalName, childName] = getTypeName(child)
 
         if childName in processed:
             continue
+
+        if not originalName:
+            continue
+
+        if originalName == "NCollection_Utf16Iter":
+            continue
+
+        # if originalName != "BOPAlgo_ListOfEdgeInfo":
+        #     continue
 
         processFunction = None
 
@@ -206,8 +358,6 @@ def processChildren(
 
         processed.add(childName)
 
-        console.log(f"Processing {childName}")
-
         func = delayed(processChild)
 
         futures.append(
@@ -216,7 +366,6 @@ def processChildren(
                 buildType,
                 extension,
                 processFunction,
-                preamble,
             )
         )
 
@@ -226,16 +375,63 @@ def processChildren(
 
 
 @typechecked
+def getIncludeFiles(
+    decl: Union[declarations.declaration_t, declarations.cpptypes.type_t],
+) -> str | None:
+    while hasattr(decl, "base"):
+        decl = decl.base
+
+    if isinstance(decl, declarations.declarated_t):
+        decl = decl.declaration
+
+    queue = [decl]
+    result = set()
+    checked = {}
+
+    while len(queue):
+        d = queue.pop()
+
+        if isinstance(d, declarations.fundamental_t):
+            continue
+
+        [originalName, partialName] = getTypeName(d)
+
+        if originalName in checked:
+            continue
+
+        checked[originalName] = True
+
+        # FIXME
+        # founds = getattr(cache, originalName, [])
+        # print(founds, originalName, founds.__class__.__name__)
+        # queue.extend(founds)
+
+        # if declarations.templates.is_instantiation(originalName):
+        #     _, params = declarations.templates.split(originalName)
+
+        #     for param in params:
+        #         founds = getattr(cache, param, [])
+        #         queue.extend(founds)
+
+        if hasattr(d, "location"):
+            if d.location is not None:
+                fileName: str = d.location.file_name
+
+                fileName = fileName.replace(".lxx", ".hxx")
+
+                if fileName.startswith(OCCT_SRC_PATH) or fileName.endswith(HEADER_PATH):
+                    result.add(os.path.basename(fileName))
+
+    return result
+
+
+@typechecked
 def embindGenerationFuncClasses(
     preamble: str,
     child: declarations.class_t,
     className: str = None,
 ) -> str:
     embindings = EmbindBindings()
-
-    if child.location is not None:
-        file_path = child.location.file_name
-        preamble = f'#include "{os.path.basename(file_path)}"\n{referenceTypeTemplateDefs}'
 
     output = embindings.processClass(child, className=className)
 
@@ -254,7 +450,7 @@ def embindGenerationFuncTemplates(
 
     if isinstance(templateClass, declarations.class_t):
         return embindGenerationFuncClasses(
-            preamble, templateClass, className=child.name
+            preamble, templateClass, className=child.decl_string
         )
 
     return ""
@@ -267,49 +463,19 @@ def embindGenerationFuncEnums(
 ) -> str:
     embindings = EmbindBindings()
 
-    if child.location is not None:
-        file_path = child.location.file_name
-        preamble = f'#include "{os.path.basename(file_path)}"\n{referenceTypeTemplateDefs}'
-
     output = embindings.processEnum(child)
 
     return preamble + output
 
 
 @typechecked
-def templateTypedefGenerator(ns: declarations.namespace_t):
-    """
-    pygccxml global_namespace에서 템플릿 인자를 가진 typedef만 반환
-    """
-    typedefs = []
-    for td in ns.typedefs():
-        try:
-            underlying = td.decl_type
-            # 템플릿 인자가 있는지 간단히 문자열로 판별
-            if "<" in str(underlying) and ">" in str(underlying):
-                typedefs.append(td)
-        except:
-            continue
-    return typedefs
-
-
-@typechecked
-def typedefGenerator(ns: declarations.namespace_t):
-    """
-    pygccxml global_namespace에서 모든 typedef 반환
-    """
-    return list(ns.typedefs())
-
-
-@typechecked
-def process(extension: str, preamble: str, customCode: str):
+def process(extension: str, customCode: str):
     tu = parse(customCode)
 
     processChildren(
         tu,
         "bindings",
         extension,
-        preamble,
     )
 
 
@@ -339,23 +505,22 @@ def parse(additionalCppCode: str = ""):
 
     # 가상 헤더 파일 내용 생성
     header_content = OCCT_INCLUDE_STATEMENTS + "\n" + additionalCppCode
-    # HEADER_NAME = generate()
-    HEADER_NAME = "myMain"
-    header_path = f"{HEADER_NAME}.h"
+
+    console.print("Writing header file...")
 
     # 임시 헤더 파일 생성
-    tmp_dir = tempfile.gettempdir()
-    tmp_header_path = os.path.join(tmp_dir, header_path)
-    with open(tmp_header_path, "w") as f:
+    with open(HEADER_PATH, "w") as f:
         f.write(header_content)
 
     file_config = parser.file_configuration_t(
-        data=tmp_header_path, content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
+        data=HEADER_PATH, content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
     )
 
     project_reader = parser.project_reader_t(
         xml_generator_config, cache=parser.directory_cache_t
     )
+
+    console.print("Parsing header file...")
 
     # pygccxml 파싱 수행
     decls = project_reader.read_files(
@@ -372,17 +537,11 @@ def parse(additionalCppCode: str = ""):
 def generateCustomCodeBindings(customCode: str):
     mkdirp(LIBRARY_BASE_PATH)
 
-    embindPreamble = (
-        f"{OCCT_INCLUDE_STATEMENTS}\n{referenceTypeTemplateDefs}\n{customCode}"
-    )
-
-    process(".cpp", embindPreamble, customCode)
+    process(".cpp", customCode)
 
 
 if __name__ == "__main__":
     rmrf(LIBRARY_BASE_PATH)
     mkdirp(LIBRARY_BASE_PATH)
 
-    embindPreamble = f"{OCCT_INCLUDE_STATEMENTS}\n{referenceTypeTemplateDefs}"
-
-    process(".cpp", embindPreamble, "")
+    process(".cpp", "")

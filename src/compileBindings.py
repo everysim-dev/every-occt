@@ -1,39 +1,44 @@
 #!/usr/bin/python3
 
 import os
-from Common import ocIncludePaths, additionalIncludePaths
+
+from joblib import delayed
+from Common import TMP_DIR, ocIncludePaths, additionalIncludePaths
 from plumbum import local
 
 from argparse import ArgumentParser
 from Common import buildOptions
 
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    BarColumn,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-    MofNCompleteColumn,
-)
 from Common import console
-from joblib import delayed, Parallel
+
+import sys
+
+from parallelProgress import ParallelProgress
+
+sys.path.append('/emsdk/upstream/emscripten')
+
 
 LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
 
+def tryExcept(func):
+    def result(*args):
+        try:
+            return func(*args)
+        except:
+            return None
+        
+    return result
+
 def buildOneFile(args, item):
-    emcc = local["ccache"]["emcc"][
+    return local['ccache']['emcc']([
         *buildOptions,
         args["threading"] == "multi-threaded" and "-pthread" or "",
-        *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths)),
+        *(f"-I{x}" for x in (ocIncludePaths + additionalIncludePaths + [TMP_DIR])),
         "-c",
         item,
         "-o",
         f"{item}.o",
-    ]
-
-    return emcc()
-
+    ])
 
 def compileCustomCodeBindings(args, file="myMain.h"):
     filesToBuild = []
@@ -43,6 +48,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
                 lambda x: f"{dirpath}/{x}",
                 filter(
                     lambda x: x.endswith(".cpp")
+                    # and x.endswith('AIS_DataMapOfShapeDrawer.cpp')
                     and not os.path.exists(f"{dirpath}/{x}.o"),
                     filenames,
                 ),
@@ -51,39 +57,20 @@ def compileCustomCodeBindings(args, file="myMain.h"):
 
     console.print(f"Building {len(filesToBuild)} files")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    ) as progress:
-        task_id = progress.add_task("Compiling", total=len(filesToBuild))
+    func = delayed(buildOneFile)
+    parallel = ParallelProgress(n_jobs=-1, backend="threading")
+    futures = []
 
-        func = delayed(buildOneFile)
-        parallel = Parallel(n_jobs=-1, backend="threading")
-        futures = []
+    target = sorted(filesToBuild)
 
-        target = sorted(filesToBuild)
+    for item in target:
+        if not os.path.exists(f"{item}.o"):
+            futures.append(func(args, item))
+        else:
+            console.print(f"file {item}.o already exists, skipping")
 
-        for item in target:
-            if not os.path.exists(f"{item}.o"):
-                futures.append(func(args, item))
-            else:
-                console.print(f"file {item}.o already exists, skipping")
+    parallel(futures)
 
-        results = parallel(futures)
-
-        for item, result in zip(target, results):
-            if result is not None:
-                progress.update(task_id, description=f"Building {item}", advance=1)
-            else:
-                progress.update(
-                    task_id, description=f"Skipped or Failed {item}", advance=1
-                )
 
 
 if __name__ == "__main__":
