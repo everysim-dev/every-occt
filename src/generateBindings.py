@@ -7,7 +7,7 @@ from wasmGenerator.Common import SkipException
 from Common import ocIncludeFiles, includePathArgs, console, HEADER_NAME, HEADER_PATH
 from plumbum import local
 from pygccxml import parser, declarations, utils
-import tempfile, os
+import os
 from joblib import Parallel, delayed
 from typeguard import typechecked
 
@@ -162,6 +162,17 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepBlend_ConstThroatWithPenetration": ["math_Matrix"],
         "BRepBlend_ConstRad": ["Blend_Point"],
         "NCollection_CellFilter": ["BRepMesh_CircleInspector"],
+        "BRepBlend_CSCircular": ["Blend_Point"],
+        "TCollection_AsciiString": ["TCollection_ExtendedString"],
+        "BRepAlgoAPI_BooleanOperation": ["BOPAlgo_PaveFiller"],
+        "BRepAlgoAPI_BuilderAlgo": ["BOPAlgo_PaveFiller"],
+        "BRepApprox_TheImpPrmSvSurfacesOfApprox": ["IntSurf_Quadric"],
+        "BRepApprox_ParLeastSquareOfMyGradientOfTheComputeLineBezierOfApprox": ["BRepApprox_TheMultiLineOfApprox"],
+        "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion"],
+        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": ["AppParCurves_MultiCurve"],
+        "BRepExtrema_TriangleSet": ["AppParCurves_MultiCurve"],
+        "AppDef_MyBSplGradientOfBSplineCompute": ["AppDef_MultiLine"],
+        "BRepApprox_MyBSplGradientOfTheComputeLineOfApprox": ["BRepApprox_TheMultiLineOfApprox "]
     }
 
     REQUIRED_HEADERS = [
@@ -173,6 +184,7 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepGProp_Domain",
         "gp",
         "math_Matrix",  # BRep
+        "BOPAlgo_PaveFiller",  # BRepAlgoAPI
     ]
     defaultHeaders = HEADERS[childName] if childName in HEADERS else []
 
@@ -256,7 +268,7 @@ def processChild(
 
     preamble = f"{includes}\n{referenceTypeTemplateDefs}"
 
-    if not os.path.exists(filename):
+    if True or not os.path.exists(filename):
         try:
             output = processFunction(preamble, decl)
             with open(filename, "w") as bindingsFile:
@@ -339,10 +351,7 @@ def processChildren(
         if not originalName:
             continue
 
-        if originalName == "NCollection_Utf16Iter":
-            continue
-
-        # if originalName != "BOPAlgo_ListOfEdgeInfo":
+        # if originalName != "TColStd_IndexedDataMapOfStringString":
         #     continue
 
         processFunction = None
@@ -541,7 +550,7 @@ def generateCustomCodeBindings(customCode: str):
 
 
 if __name__ == "__main__":
-    rmrf(LIBRARY_BASE_PATH)
+    # rmrf(LIBRARY_BASE_PATH)
     mkdirp(LIBRARY_BASE_PATH)
 
     process(".cpp", "")

@@ -47,7 +47,7 @@ includePathArgs = (
 )
 
 buildOptions = [
-    "-flto",
+    # "-flto",
     "-fexceptions",
     "-sDISABLE_EXCEPTION_CATCHING=0",
     "-DOCCT_NO_PLUGINS",

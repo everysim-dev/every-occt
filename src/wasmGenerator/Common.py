@@ -6,13 +6,6 @@ class SkipException(Exception):
     pass
 
 
-def isAbstractClass(theClass: declarations.class_t):
-    if hasattr(theClass, "is_abstract"):
-        return theClass.is_abstract
-
-    return False
-
-
 def getMethodOverloadPostfix(
     theClass: declarations.class_t, method: declarations.member_function_t
 ):

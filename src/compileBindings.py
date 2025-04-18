@@ -29,6 +29,7 @@ def tryExcept(func):
         
     return result
 
+@tryExcept
 def buildOneFile(args, item):
     return local['ccache']['emcc']([
         *buildOptions,
@@ -48,7 +49,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
                 lambda x: f"{dirpath}/{x}",
                 filter(
                     lambda x: x.endswith(".cpp")
-                    # and x.endswith('AIS_DataMapOfShapeDrawer.cpp')
+                    # and x.endswith('TColStd_IndexedDataMapOfStringString.cpp')
                     and not os.path.exists(f"{dirpath}/{x}.o"),
                     filenames,
                 ),
