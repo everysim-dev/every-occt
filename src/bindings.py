@@ -251,6 +251,8 @@ class EmbindBindings(Bindings):
             + self.processClassInner(
                 theClass, templateDecl, templateArgs, className=className
             )
+            + '\n  function("doLeakCheck", &__lsan_do_recoverable_leak_check);\n'
+            + "\n  register_optional<Message_ProgressRange>();\n"
             + "}\n\n"
         )
 
@@ -346,9 +348,6 @@ class EmbindBindings(Bindings):
             for constructor in constructors
             if constructor.access_type == "public" and constructor.parent is theClass
         ]
-
-        print("foo", len(constructors), len(publicConstructors))
-
 
         for index in range(len(publicConstructors)):
             constructor: declarations.constructor_t = publicConstructors[index]

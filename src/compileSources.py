@@ -6,7 +6,9 @@ import multiprocessing
 from filter.filterSourceFiles import filterSourceFile
 from filter.filterPackages import filterPackages
 from plumbum import local
-from Common import buildOptions, console
+from Common import buildOptions, console, tryExcept
+from joblib import delayed
+from parallelProgress import ParallelProgress
 
 from argparse import ArgumentParser
 
@@ -47,17 +49,14 @@ for dirpath, dirnames, filenames in os.walk(os.path.join(SOURCE_BASE_PATH)):
 
 mkdirp = local["mkdir"]["-p"]
 
+@tryExcept
 def buildObjectFiles(file, args):
   relativeFile = file.replace(SOURCE_BASE_PATH, "")
   mkdirp(f"{LIBRARY_BASE_PATH}/{os.path.dirname(relativeFile)}")
 
   emcc = local['ccache']["emcc"][
     *buildOptions,
-    # "-g3",
-    # "-gsource-map",
-    # "--source-map-base=http://localhost:8080",
-    # "-fPIC",
-    "-pthread" if args["threading"] == "multi-threaded" else "",
+    *(["-pthread", "-DHAVE_TBB"] if args["threading"] == "multi-threaded" else []),
     *list(map(lambda x: "-I" + x, includePaths)),
     "-c", file,
     "-o", f"{LIBRARY_BASE_PATH}/{relativeFile}.o"
@@ -67,7 +66,6 @@ def buildObjectFiles(file, args):
     console.print(f"Building {relativeFile}")
     return emcc()
   else:
-    console.print(f"{relativeFile}.o already exists, skipping")
     return None
 
 allModules = {}
@@ -104,9 +102,11 @@ if __name__ == "__main__":
   mkdirp(LIBRARY_BASE_PATH)
 
   def myBuildFunction(x):
-    buildObjectFiles(x, {
+    return buildObjectFiles(x, {
       "threading": args.threading,
     })
 
-  with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as p:
-    p.map(myBuildFunction, filesToBuild)
+  func = delayed(myBuildFunction)
+  parallel = ParallelProgress(n_jobs=-1, backend="threading", total_tasks=len(filesToBuild), desc="Compiling sources")
+  futures = [func(x) for x in filesToBuild]
+  parallel(futures)

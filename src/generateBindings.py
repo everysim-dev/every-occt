@@ -28,52 +28,59 @@ referenceTypeTemplateDefs = """
 #include <emscripten/bind.h>
 #include <functional>
 #include <type_traits>
+#include <array>
+#include <stdexcept>
 
 using namespace emscripten;
 
-// 일반 타입(T) 전용 (함수 포인터가 아닌 경우)
+// C++17 if constexpr 기반 통합 getReferenceValue/updateReferenceValue
 template<typename T>
-typename std::enable_if<!std::is_pointer<T>::value || !std::is_function<typename std::remove_pointer<T>::type>::value, T>::type
-getReferenceValue(const emscripten::val& v) {
-  if(!(v.typeOf().as<std::string>() == "object")) {
-    return v.as<T>(allow_raw_pointers());
-  } else if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
-    return v["current"].as<T>(allow_raw_pointers());
+auto getReferenceValue(const val& v) {
+  if constexpr (std::is_array_v<T>) {
+    using U = std::remove_extent_t<T>;
+    constexpr size_t N = std::extent_v<T>;
+    std::array<U, N> arr;
+    for (size_t i = 0; i < N; ++i) {
+      arr[i] = v[i].template as<U>(allow_raw_pointers());
+    }
+    return arr;
   }
-  throw("unsupported type");
-}
-
-// 함수 포인터(T = R(*)(Args...)) 전용
-template<typename T>
-typename std::enable_if<std::is_pointer<T>::value && std::is_function<typename std::remove_pointer<T>::type>::value, T>::type
-getReferenceValue(const emscripten::val& v) {
-  if (v.typeOf().as<std::string>() == "function") {
-    // 함수 포인터 타입 추론: R(*)(Args...)
-    using FnType = typename std::remove_pointer<T>::type;
-    // trampoline 람다를 heap에 할당하여 함수 포인터로 반환
-    static auto trampoline = [v](auto&&... args) -> decltype(std::declval<FnType>()(args...)) {
-      return v(args...).template as<decltype(std::declval<FnType>()(args...))>();
-    };
-    return reinterpret_cast<T>(&trampoline);
+  else if constexpr (std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>) {
+    if (v.typeOf().as<std::string>() == "function") {
+      using FnType = std::remove_pointer_t<T>;
+      auto cb = v;  
+      return reinterpret_cast<T>(+[cb](auto&&... args) -> decltype(auto) {
+        return cb(std::forward<decltype(args)>(args)...)
+            .template as<decltype(cb(std::forward<decltype(args)>(args)...))>();
+      });
+    }
+    throw std::runtime_error("Unsupported function pointer type");
   }
-  throw("unsupported function pointer type");
-}
-
-template<typename T>
-typename std::enable_if<!std::is_pointer<T>::value || !std::is_function<typename std::remove_pointer<T>::type>::value>::type
-updateReferenceValue(emscripten::val& v, T& val) {
-  if(v.typeOf().as<std::string>() == "object" && v.hasOwnProperty("current")) {
-    v.set("current", val);
+  else {
+    if (v.typeOf().as<std::string>() != "object")
+      return v.as<T>(allow_raw_pointers());
+    if (v.hasOwnProperty("current"))
+      return v["current"].as<T>(allow_raw_pointers());
+    throw std::runtime_error("Unsupported type");
   }
 }
 
-// 함수 포인터 타입: 아무 동작도 하지 않음
 template<typename T>
-typename std::enable_if<std::is_pointer<T>::value && std::is_function<typename std::remove_pointer<T>::type>::value>::type
-updateReferenceValue(emscripten::val&, T&) {
-  // 함수 포인터는 업데이트 불가
+void updateReferenceValue(val& v, const T& ref) {
+  if constexpr (std::is_array_v<T>) {
+    constexpr size_t N = std::extent_v<T>;
+    val arr = v["current"];
+    for (size_t i = 0; i < N; ++i) {
+      arr.set(i, ref[i]);
+    }
+  }
+  else if constexpr (!(std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>)) {
+    if (v.hasOwnProperty("current")) {
+      v.set("current", ref);
+    }
+  }
+  // 함수 포인터인 경우 no-op
 }
-
 """
 
 cache = {}
@@ -167,12 +174,21 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepAlgoAPI_BooleanOperation": ["BOPAlgo_PaveFiller"],
         "BRepAlgoAPI_BuilderAlgo": ["BOPAlgo_PaveFiller"],
         "BRepApprox_TheImpPrmSvSurfacesOfApprox": ["IntSurf_Quadric"],
-        "BRepApprox_ParLeastSquareOfMyGradientOfTheComputeLineBezierOfApprox": ["BRepApprox_TheMultiLineOfApprox"],
+        "BRepApprox_ParLeastSquareOfMyGradientOfTheComputeLineBezierOfApprox": [
+            "BRepApprox_TheMultiLineOfApprox"
+        ],
         "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion"],
-        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": ["AppParCurves_MultiCurve"],
+        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": [
+            "AppParCurves_MultiCurve"
+        ],
         "BRepExtrema_TriangleSet": ["AppParCurves_MultiCurve"],
         "AppDef_MyBSplGradientOfBSplineCompute": ["AppDef_MultiLine"],
-        "BRepApprox_MyBSplGradientOfTheComputeLineOfApprox": ["BRepApprox_TheMultiLineOfApprox "]
+        "BRepApprox_MyBSplGradientOfTheComputeLineOfApprox": [
+            "BRepApprox_TheMultiLineOfApprox"
+        ],
+        "BRepMesh_GeomTool": ["BRepAdaptor_Curve"],
+        "BRepBuilderAPI_MakeSolid": ["TopoDS_CompSolid"],
+        "BRepBlend_AppFuncRst": ["Blend_SurfRstFunction"],
     }
 
     REQUIRED_HEADERS = [
@@ -183,6 +199,7 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepGProp_Face",
         "BRepGProp_Domain",
         "gp",
+        "Message_ProgressRange",
         "math_Matrix",  # BRep
         "BOPAlgo_PaveFiller",  # BRepAlgoAPI
     ]
@@ -232,10 +249,13 @@ def processHeaders(decl: declarations.declaration_t):
             x,
         ),
     )
+    includeFiles.append(f"sanitizer/lsan_interface.h")
 
     return "\n".join(
         map(
-            lambda x: f'#include "{x}"' if x == f"{HEADER_NAME}.h" else f"#include <{x}>",
+            lambda x: (
+                f'#include "{x}"' if x == f"{HEADER_NAME}.h" else f"#include <{x}>"
+            ),
             includeFiles,
         )
     )
@@ -340,10 +360,9 @@ def processChildren(
 
     for child in children:
         [originalName, childName] = getTypeName(child)
-    
+
         if not filterCommon(child):
             continue
-
 
         if childName in processed:
             continue
@@ -351,7 +370,7 @@ def processChildren(
         if not originalName:
             continue
 
-        # if originalName != "TColStd_IndexedDataMapOfStringString":
+        # if originalName != "OSD_Parallel":
         #     continue
 
         processFunction = None
@@ -550,7 +569,7 @@ def generateCustomCodeBindings(customCode: str):
 
 
 if __name__ == "__main__":
-    # rmrf(LIBRARY_BASE_PATH)
+    rmrf(LIBRARY_BASE_PATH)
     mkdirp(LIBRARY_BASE_PATH)
 
     process(".cpp", "")

@@ -10,13 +10,15 @@ from cerberus import Validator
 from argparse import ArgumentParser
 from Common import ocIncludePaths, additionalIncludePaths
 from plumbum import local
-from Common import buildOptions, console
+from Common import buildOptions, console, DEBUG_OPTIONS
 
 parser = ArgumentParser()
 parser.add_argument(dest="filename", help="Custom build input file (.yml)", metavar="FILE.yml")
 args = parser.parse_args()
 
 LIBRARY_BASE_PATH = "/opencascade.js/build"
+SRC_PATH = os.path.dirname(os.path.abspath(__file__))
+STUBS_PATH = os.path.join(SRC_PATH, "stubs")
 
 mkdirp = local["mkdir"]["-p"]
 rmrf = local["rm"]["-rf"]
@@ -63,6 +65,34 @@ def shouldProcessSymbol(symbol: str, bindings) -> bool:
     return True
   return False
 
+def compileStubFiles():
+  stub_objects = []
+  
+  # 스텁 디렉토리에 있는 모든 .cpp 파일 컴파일
+  if os.path.exists(STUBS_PATH):
+    for filename in os.listdir(STUBS_PATH):
+      if filename.endswith(".cpp"):
+        stub_file = os.path.join(STUBS_PATH, filename)
+        stub_obj = f"{stub_file}.o"
+        
+        console.print(f"컴파일 스텁 파일: {stub_file}")
+        
+        emcc = local["ccache"]["emcc"][
+          *buildOptions,
+          *(["-pthread", "-DHAVE_TBB"] if os.environ.get("threading", "") == "multi-threaded" else []),
+          *list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths)),
+          "-c", stub_file,
+          "-o", stub_obj,
+        ]
+        
+        try:
+          emcc()
+          stub_objects.append(stub_obj)
+        except Exception as e:
+          console.print(f"스텁 파일 컴파일 실패: {stub_file}, 오류: {str(e)}")
+  
+  return stub_objects
+
 def runBuild(build):
   def getAdditionalBindCodeO():
     if "additionalBindCode" in build:
@@ -76,7 +106,7 @@ def runBuild(build):
       console.print(f"building {additionalBindCodeFileName}")
       emcc = local["ccache"]["emcc"][
         *buildOptions,
-        "-pthread" if os.environ["threading"] == "multi-threaded" else "",
+        *(["-pthread", "-DHAVE_TBB"] if os.environ["threading"] == "multi-threaded" else []),
         *list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths)),
         "-c", additionalBindCodeFileName,
         "-o", f"{additionalBindCodeFileName}.o",
@@ -92,38 +122,32 @@ def runBuild(build):
   bindingsO = []
   for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/bindings"):
     for item in filenames:
-      arr = [
-        'TCollection_ExtendedString'
-        # 'TCollection',
-        # 'TopoDS_',
-        # 'BRep',
-        # 'Message_ProgressRange',
-        # "Handle_",
-        # 'BRepFilletAPI_MakeChamfer',
-        
-        # 'ChFiDS_ChamfMode',
-      ]
-
-      if False and any(map(lambda x: item.startswith(x) and item.endswith('.cpp.o'), arr)):
+      if shouldProcessSymbol(item[:-6], build["bindings"]) and item.endswith(f".cpp.o"):
         bindingsO.append(f"{dirpath}/{item}")
-      elif item.endswith(f".cpp.o") and shouldProcessSymbol(item[:-6], build["bindings"]):
-        bindingsO.append(f"{dirpath}/{item}")
+  
   sourcesO = []
   for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/sources"):
     for item in filenames:
       if item.endswith(".o"):
         sourcesO.append(dirpath + "/" + item)
-  print(f"Bindings: {len(bindingsO)}, Sources: {len(sourcesO)}")
+
+  stub_objects = compileStubFiles()
+
+  print(f"Bindings: {len(bindingsO)}, Sources: {len(sourcesO)}, Stub files: {len(stub_objects)}")
+
+  threading = os.environ.get("threading", "single-threaded")
+
   emcc = local['ccache']["emcc"][
     "-lembind",
     ("" if additionalBindCodeO is None else additionalBindCodeO),
     *bindingsO,
     *sourcesO,
+    *stub_objects,  # Updated from *stub_files to *stub_objects
     # TODO 타입스크립트 사용 시 오류 발생
     # "--emit-tsd", "interface.d.ts",
     "-o", f"{os.getcwd()}/{build['name']}",
-    "-pthread" if os.environ["threading"] == "multi-threaded" else None,
-    '-Os',
+    "-pthread" if threading == "multi-threaded" else None,
+    '-O0',
     '-sEXPORT_ES6=1',
     '-sMODULARIZE=1',
     "-sEXPORTED_RUNTIME_METHODS=['FS']",
@@ -131,6 +155,9 @@ def runBuild(build):
     "-sMAXIMUM_MEMORY=4GB",
     "-sALLOW_MEMORY_GROWTH=1",
     "-sUSE_FREETYPE=1",
+    "--allow-undefined",  # 정의되지 않은 심볼 무시
+    "-sERROR_ON_UNDEFINED_SYMBOLS=0",  # 정의되지 않은 심볼에 대한 오류 비활성화
+    *DEBUG_OPTIONS,
     # *build["emccFlags"],
   ]
   emcc()

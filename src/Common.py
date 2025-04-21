@@ -7,6 +7,14 @@ import os
 
 occtBasePath = "/occt/src/"
 
+def tryExcept(func):
+    def result(*args):
+        try:
+            return func(*args)
+        except:
+            return None
+        
+    return result
 
 def getGlobalIncludes() -> list[list[str]]:
     includeFiles = list()
@@ -46,19 +54,28 @@ includePathArgs = (
     + [f"-I {TMP_DIR}"]
 )
 
+IS_DEBUG = True
+
+DEBUG_OPTIONS = [
+    # 디버깅
+    "-gsource-map",
+    "-fsanitize=address",
+    "-Os" if IS_DEBUG else "O0",
+] if IS_DEBUG else []
+
 buildOptions = [
-    # "-flto",
+    "-flto",
     "-fexceptions",
     "-sDISABLE_EXCEPTION_CATCHING=0",
     "-DOCCT_NO_PLUGINS",
     "-frtti",
     "-DHAVE_RAPIDJSON",
-    "-DHAVE_TBB",
     "-DHAVE_DRACO",
     "-sMALLOC=emmalloc",
     "-Wno-deprecated-declarations",
     "-Wno-delete-abstract-non-virtual-dtor",
-    # "-std=c++20",
-    "-Os",
+    "-Wno-unused-command-line-argument",
+    *DEBUG_OPTIONS,
 ]
+
 
