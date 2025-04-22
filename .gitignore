@@ -5,3 +5,5 @@ node_modules
 build-output.log
 pull-stages-output.log
 /occt-src/
+tmp
+.aider*

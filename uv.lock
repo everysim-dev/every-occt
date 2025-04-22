@@ -162,7 +162,7 @@ requires-dist = [
     { name = "ray", specifier = "==2.44.1" },
     { name = "rich", specifier = "==13.9.4" },
     { name = "ruff", specifier = ">=0.11.6" },
-    { name = "typeguard", specifier = "==4.4.2" },
+    { name = "typeguard", specifier = "==2.2.1" },
 ]
 
 [[package]]
@@ -676,14 +676,11 @@ wheels = [
 
 [[package]]
 name = "typeguard"
-version = "4.4.2"
+version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/70/60/8cd6a3d78d00ceeb2193c02b7ed08f063d5341ccdfb24df88e61f383048e/typeguard-4.4.2.tar.gz", hash = "sha256:a6f1065813e32ef365bc3b3f503af8a96f9dd4e0033a02c28c4a4983de8c6c49", size = 75746, upload_time = "2025-02-16T16:28:26.205Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/a1/19c67346b979338733e19db67eba4b398e2c2cfb4185d6da7f8fb1babcb1/typeguard-2.2.1.tar.gz", hash = "sha256:89159e9ab54a436db4759c32eeb0ae6e9b65cf7fe5b838daad4a658024ec3b43", size = 18935, upload_time = "2018-08-12T19:29:29.512Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/cf/4b/9a77dc721aa0b7f74440a42e4ef6f9a4fae7324e17f64f88b96f4c25cc05/typeguard-4.4.2-py3-none-any.whl", hash = "sha256:77a78f11f09777aeae7fa08585f33b5f4ef0e7335af40005b0c422ed398ff48c", size = 35801, upload_time = "2025-02-16T16:28:24.793Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/5f/66b4f8b60c9af3f248f9329487a6d441fab724ae40b83f2b69f99da68970/typeguard-2.2.1-py3-none-any.whl", hash = "sha256:b460b70b6a24f088fd2d9c9a29839dd0a81556a91cc5b48aa17ae97c738ce08d", size = 10670, upload_time = "2018-08-12T19:29:28.414Z" },
 ]
 
 [[package]]

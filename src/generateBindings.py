@@ -1,8 +1,10 @@
 #!/usr/bin/python3
 
+from dataclasses import dataclass
 from typing import Callable, Union
 from bindings import EmbindBindings
 import os
+from parser import is_public
 from wasmGenerator.Common import SkipException, unwrapType
 from Common import ocIncludeFiles, includePathArgs, console, HEADER_NAME, HEADER_PATH
 from plumbum import local
@@ -536,31 +538,126 @@ def embindGenerationFuncEnums(
     return preamble + output
 
 
+def get_public_methods_and_ctors(class_cursor: cindex.Cursor) -> tuple[list[str], list[str]]:
+    """
+    주어진 클래스 커서에 대해 public 메서드와 생성자 목록을 반환합니다.
+    """
+    methods:    list[C_Method] = []
+    ctors:      list[C_Constructor] = []
+    for child in class_cursor.get_children():
+        if is_public(child):
+            if child.kind == cindex.CursorKind.CXX_METHOD:
+                name = child.spelling
+
+                raw_args = [arg for arg in child.get_arguments()]
+
+                if any(map(lambda x: not is_public(x), raw_args)):
+                    continue
+                if not is_public(child.result_type):
+                    continue
+
+                if child.spelling.startswith("operator"):
+                    continue
+
+                args = [C_Argument(arg.spelling, arg.type.spelling) for arg in raw_args]
+                returnType = C_Type(child.result_type.spelling)
+
+                methods.append(
+                    C_Method(name, args, returnType)
+                )
+            elif child.kind == cindex.CursorKind.CONSTRUCTOR:
+                raw_args = [arg for arg in child.get_arguments()]
+
+                if any(map(lambda x: not is_public(x), raw_args)):
+                    continue
+
+                args = [C_Argument(arg.spelling, arg.type.spelling) for arg in raw_args]
+
+                ctors.append(C_Constructor(child.spelling, args))
+    return methods, ctors
+
+
+@dataclass
+class C_Type:
+    name: str
+
+@dataclass
+class C_Argument:
+    name: str
+    type: C_Type
+
+@dataclass
+class C_Method:
+    name: str
+    args: list[C_Argument]
+    returnType: C_Type
+
+@dataclass
+class C_Constructor:
+    name: str
+    args: list[C_Argument]
+
+@dataclass
+class C_Class:
+    name: str
+    methods: list[C_Method]
+    constructors: list[C_Constructor]
+
 @typechecked
-def process(extension: str, customCode: str):
+def process(extension: str, customCode: str):    
+    cindex.Config.set_library_file(
+        "/usr/lib/x86_64-linux-gnu/libclang-20.so.1"
+    )
+    index = cindex.Index.create()
+
+    print("Index created")
+
+    translationUnit = index.parse(
+        HEADER_PATH, [
+        "-x",
+        "c++",
+        "-stdlib=libc++",
+        "-D__EMSCRIPTEN__"
+        ] + includePathArgs
+    )
+
+    classes = []
+
+    for cursor in translationUnit.cursor.get_children():
+        name = cursor.spelling
+
+        if not name.startswith("Handle_"):
+            continue
+
+        if cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
+            cursor = cursor.underlying_typedef_type
+
+        if cursor.kind == cindex.TypeKind.ELABORATED:
+            cursor = cursor.get_named_type()
+    
+
+        if cursor.kind == cindex.TypeKind.UNEXPOSED:
+            cursor = cursor.get_canonical()  
+
+        if cursor.kind == cindex.TypeKind.RECORD:
+            cursor = cursor.get_declaration()
+
+        if not is_public(cursor):
+            continue
+
+        # print(f"Class: {name}, Cursor: {cursor.spelling}, kind: {cursor.kind}")
+
+        if cursor.kind == cindex.CursorKind.CLASS_DECL:
+            methods, constructors = get_public_methods_and_ctors(cursor)
+            theClass = C_Class(name, methods, constructors)
+            classes.append(theClass)
+            # print(f"{name}, methods: {methods}, Constructors: {constructors}")
+
+    print(f"Classes: {len(classes)}")
+
+    exit()
+
     ns = parse(customCode)
-    
-    # cindex.Config.set_library_file(
-    #     "/usr/lib/x86_64-linux-gnu/libclang-20.so.1"
-    # )
-    # index = cindex.Index.create()
-
-    # print("Index created")
-
-    # translationUnit = index.parse(
-    #     HEADER_PATH, [
-    #     "-x",
-    #     "c++",
-    #     "-stdlib=libc++",
-    #     "-D__EMSCRIPTEN__"
-    #     ] + includePathArgs
-    # )
-
-    
-    # for cursor in translationUnit.cursor.get_children():
-    #     if cursor.kind == cindex.CursorKind.CLASS_DECL:
-    #         print(f"{cursor.spelling}")
-
 
     processChildren(
         ns,
