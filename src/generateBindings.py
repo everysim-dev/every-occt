@@ -629,18 +629,32 @@ def process(extension: str, customCode: str):
         if not name.startswith("Handle_"):
             continue
 
+        if not cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
+            print("1", cursor.spelling, cursor.kind)
+
         if cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
             cursor = cursor.underlying_typedef_type
 
+        if not cursor.kind == cindex.TypeKind.ELABORATED:
+            print("2", cursor.spelling, cursor.kind)
+
         if cursor.kind == cindex.TypeKind.ELABORATED:
             cursor = cursor.get_named_type()
-    
+
+        if not cursor.kind == cindex.TypeKind.UNEXPOSED:
+            print("3", cursor.spelling, cursor.kind)
 
         if cursor.kind == cindex.TypeKind.UNEXPOSED:
-            cursor = cursor.get_canonical()  
+            cursor = cursor.get_canonical()
+
+        if not cursor.kind == cindex.TypeKind.RECORD:
+            print("4", cursor.spelling, cursor.kind)
 
         if cursor.kind == cindex.TypeKind.RECORD:
             cursor = cursor.get_declaration()
+
+        if not cursor.kind == cindex.CursorKind.CLASS_DECL:
+            print("5", cursor.spelling, cursor.kind)
 
         if not is_public(cursor):
             continue
