@@ -3,13 +3,14 @@
 from typing import Callable, Union
 from bindings import EmbindBindings
 import os
-from wasmGenerator.Common import SkipException
+from wasmGenerator.Common import SkipException, unwrapType
 from Common import ocIncludeFiles, includePathArgs, console, HEADER_NAME, HEADER_PATH
 from plumbum import local
 from pygccxml import parser, declarations, utils
 import os
 from joblib import Parallel, delayed
 from typeguard import typechecked
+from clang import cindex
 
 LIBRARY_BASE_PATH = os.environ.get(
     "OCJS_BINDINGS_PATH", "/opencascade.js/build/bindings"
@@ -122,13 +123,15 @@ cache = {}
 
 @typechecked
 def getClass(decl: declarations.declaration_t) -> declarations.class_t | None:
-    while isinstance(decl, declarations.typedef_t):
-        decl = decl.decl_type
-        if hasattr(decl, "declaration"):
-            decl = decl.declaration
+    result = decl
 
-    if isinstance(decl, declarations.class_t):
-        return decl
+    while isinstance(result, declarations.typedef_t):
+        result = result.decl_type
+        if hasattr(result, "declaration"):
+            result = result.declaration
+
+    if isinstance(result, declarations.class_t):
+        return result
 
     return None
 
@@ -367,6 +370,7 @@ def processChildren(
     ns: declarations.namespace_t,
     buildType: str,
     extension: str,
+    # tu: cindex.TranslationUnit,
 ) -> None:
     children = (
         list(ns.typedefs())
@@ -394,6 +398,8 @@ def processChildren(
 
     for child in children:
         [originalName, childName] = getTypeName(child)
+
+        print(f"Processing {childName}")
 
         if not filterCommon(child):
             continue
@@ -439,7 +445,7 @@ def processChildren(
 @typechecked
 def getIncludeFiles(
     decl: Union[declarations.declaration_t, declarations.cpptypes.type_t],
-) -> str | None:
+) -> set | None:
     while hasattr(decl, "base"):
         decl = decl.base
 
@@ -532,10 +538,32 @@ def embindGenerationFuncEnums(
 
 @typechecked
 def process(extension: str, customCode: str):
-    tu = parse(customCode)
+    ns = parse(customCode)
+    
+    # cindex.Config.set_library_file(
+    #     "/usr/lib/x86_64-linux-gnu/libclang-20.so.1"
+    # )
+    # index = cindex.Index.create()
+
+    # print("Index created")
+
+    # translationUnit = index.parse(
+    #     HEADER_PATH, [
+    #     "-x",
+    #     "c++",
+    #     "-stdlib=libc++",
+    #     "-D__EMSCRIPTEN__"
+    #     ] + includePathArgs
+    # )
+
+    
+    # for cursor in translationUnit.cursor.get_children():
+    #     if cursor.kind == cindex.CursorKind.CLASS_DECL:
+    #         print(f"{cursor.spelling}")
+
 
     processChildren(
-        tu,
+        ns,
         "bindings",
         extension,
     )
@@ -553,7 +581,6 @@ def parse(additionalCppCode: str = ""):
         xml_generator=generator_name,
         compiler_path="/emsdk/upstream/bin/clang++",
         keep_xml=True,
-        # content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
     )
 
     # include path 인자 구성 + Emscripten 전용 플래그 추가
@@ -564,7 +591,7 @@ def parse(additionalCppCode: str = ""):
     ]
     extra_flags = [
         "-D__EMSCRIPTEN__",
-        "-std=c++17",
+        # "-std=c++17",
     ]
 
     xml_generator_config.cflags = " ".join(args + extra_flags)
@@ -578,6 +605,8 @@ def parse(additionalCppCode: str = ""):
     with open(HEADER_PATH, "w") as f:
         f.write(header_content)
 
+    console.print("Parsing header file...")
+
     file_config = parser.file_configuration_t(
         data=HEADER_PATH, content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
     )
@@ -586,11 +615,9 @@ def parse(additionalCppCode: str = ""):
         xml_generator_config, cache=parser.directory_cache_t
     )
 
-    console.print("Parsing header file...")
-
     # pygccxml 파싱 수행
     decls = project_reader.read_files(
-        [file_config], compilation_mode=parser.COMPILATION_MODE.ALL_AT_ONCE
+        [file_config], compilation_mode=parser.COMPILATION_MODE.FILE_BY_FILE
     )
     global_ns = declarations.get_global_namespace(decls)
 

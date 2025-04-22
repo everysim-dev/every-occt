@@ -61,7 +61,7 @@ def shouldProcessSymbol(symbol: str, bindings) -> bool:
   if len(bindings) == 0:
     return True
   entry = next((b for b in bindings if b["symbol"] == symbol), None)
-  if not entry is None:
+  if entry is not None:
     return True
   return False
 
@@ -122,7 +122,7 @@ def runBuild(build):
   bindingsO = []
   for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/bindings"):
     for item in filenames:
-      if shouldProcessSymbol(item[:-6], build["bindings"]) and item.endswith(f".cpp.o"):
+      if shouldProcessSymbol(item[:-6], build["bindings"]) and item.endswith(".cpp.o"):
         bindingsO.append(f"{dirpath}/{item}")
   
   sourcesO = []

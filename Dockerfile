@@ -2,40 +2,28 @@ FROM emscripten/emsdk:4.0.7 AS base-image
 
 RUN \
   apt update && \
-  ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime && \
   apt install -y \
   libbz2-dev \
   ccache \
-  software-properties-common && \
-  add-apt-repository ppa:deadsnakes/ppa && \
-  apt update && \
-  apt install -y \
-  libdraco-dev \
-  python3.11 \
+  python3-apt \
+  software-properties-common \
+  gnupg \
   castxml && \
-  rm -rf /var/lib/apt/lists/* && \
-  mkdir -p /opt/draco && \
-  mv /usr/include/draco /opt/include && \
-  rm /usr/bin/python3 && \
-  ln -s $(which python3.11) /usr/bin/python3 && \
-  ln -s $(which python3.11) /usr/bin/python && \
-  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
   rm -rf /var/lib/apt/lists/*
 
 RUN \
-  python3 -m pip install \
-  pyyaml==6.0.2 \
-  cerberus==1.3.7 \
-  argparse==1.4.0 \
-  plumbum==1.9.0 \
-  rich==13.9.4 \
-  pytest==8.3.5 \
-  pytest-mock==3.14.0 \
-  pygccxml==3.0.2 \
-  typeguard==2.2.1 \
-  joblib==1.4.2 \
-  clang==20.1.0 \
-  ray==2.44.1
+  wget https://apt.llvm.org/llvm.sh && \
+  chmod +x llvm.sh && \
+  ./llvm.sh 20
+
+RUN \
+  apt update && \
+  apt install -y \
+  libclang-20-dev \
+  libclang-cpp20-dev && \  
+  rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ENV RAPIDJSON_VERSION=1.1.0
 ENV FREETYPE_VERSION=2-13-3
@@ -64,6 +52,12 @@ WORKDIR /opencascade.js/
 COPY src ./src
 WORKDIR /src
 
+COPY .python-version /src/.python-version
+COPY pyproject.toml /src/pyproject.toml
+COPY uv.lock /src/uv.lock
+
+RUN /root/.local/bin/uv sync
+
 ARG threading=single-threaded
 ENV threading=$threading
 
@@ -72,9 +66,9 @@ FROM base-image AS test-image
 RUN \
   mkdir /opencascade.js/build/ && \
   mkdir /opencascade.js/dist/ && \
-  /opencascade.js/src/applyPatches.py
+  /root/.local/bin/uv run /opencascade.js/src/applyPatches.py
 
-ENTRYPOINT ["python3", "/opencascade.js/src/buildFromYaml.py"]
+ENTRYPOINT ["/root/.local/bin/uv", "run", "/opencascade.js/src/buildFromYaml.py"]
 
 FROM test-image AS custom-build-image
 
@@ -85,4 +79,4 @@ FROM test-image AS custom-build-image
 #   chmod -R 777 /opencascade.js/ && \
 #   chmod -R 777 /occt
 
-ENTRYPOINT ["python3", "/opencascade.js/src/buildFromYaml.py"]
+ENTRYPOINT ["/root/.local/bin/uv", "run", "/opencascade.js/src/buildFromYaml.py"]

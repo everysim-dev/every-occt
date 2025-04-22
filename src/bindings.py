@@ -8,7 +8,6 @@ from wasmGenerator.Common import (
 )
 from Common import console
 from typing import Union, Optional, Dict
-from typing import Optional
 from typeguard import typechecked
 import re
 
@@ -730,7 +729,7 @@ class EmbindBindings(Bindings):
                 console.print(
                     f"Cannot handle array properties, skipping {className}::{method.name}"
                 )
-            elif not (getattr(method, "base", None) is None):
+            elif getattr(method, "base", None) is not None:
                 console.print(
                     f"Cannot handle pointer properties, skipping {className}::{method.name}"
                 )

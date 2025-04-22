@@ -5,7 +5,7 @@ import os
 from filter.filterSourceFiles import filterSourceFile
 from filter.filterPackages import filterPackages
 from plumbum import local
-from Common import buildOptions, console, tryExcept
+from Common import buildOptions, console
 from joblib import delayed
 from parallelProgress import ParallelProgress
 from Common import includePathArgs

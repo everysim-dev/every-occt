@@ -1,4 +1,4 @@
-from rich.progress import Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn, TaskProgressColumn, MofNCompleteColumn, ProgressColumn, BarColumn
+from rich.progress import Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn, MofNCompleteColumn, ProgressColumn, BarColumn
 from joblib import Parallel
 
 class TasksPerSecondColumn(ProgressColumn):
