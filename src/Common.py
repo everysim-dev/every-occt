@@ -37,21 +37,25 @@ additionalIncludePaths = [
     "/rapidjson/include",
     "/freetype/include/freetype",
     "/freetype/include",
+    "/opt/include",
 ]
 
 includePathArgs = (
     list(dict.fromkeys(map(lambda x: "-I" + x, ocIncludePaths)))
-    + list(
-        map(
-            lambda x: "-I" + x,
-            [
-                "/emsdk/upstream/emscripten/system/include/",
-                "/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
-            ],
-        )
-    )
+    # + list(
+    #     map(
+    #         lambda x: "-I" + x,
+    #         [
+    #             "/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1",
+    #             "/emsdk/upstream/emscripten/cache/sysroot/include/compat",
+    #             "/emsdk/upstream/emscripten/cache/sysroot/include",
+    #             # "/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
+    #             # "/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1/__type_traits/",
+    #         ],
+    #     )
+    # )
     + list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths))
-    + [f"-I {TMP_DIR}"]
+    + [f"-I{TMP_DIR}"]
 )
 
 IS_DEBUG = True
@@ -70,11 +74,12 @@ buildOptions = [
     "-DOCCT_NO_PLUGINS",
     "-frtti",
     "-DHAVE_RAPIDJSON",
-    "-DHAVE_DRACO",
-    "-sMALLOC=emmalloc",
+    # "-DHAVE_DRACO",
+    # "-sMALLOC=emmalloc",
     "-Wno-deprecated-declarations",
     "-Wno-delete-abstract-non-virtual-dtor",
     "-Wno-unused-command-line-argument",
+    # "-std=c++14",
     *DEBUG_OPTIONS,
 ]
 

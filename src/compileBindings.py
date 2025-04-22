@@ -40,7 +40,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
                 lambda x: f"{dirpath}/{x}",
                 filter(
                     lambda x: x.endswith(".cpp")
-                    # and x.endswith('BRepBuilderAPI_MakeSolid.cpp')
+                    # and x.endswith('XSControl_Reader.cpp')
                     and not os.path.exists(f"{dirpath}/{x}.o"),
                     filenames,
                 ),

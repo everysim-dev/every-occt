@@ -1,4 +1,4 @@
-FROM emscripten/emsdk:4.0.6 AS base-image
+FROM emscripten/emsdk:4.0.7 AS base-image
 
 RUN \
   apt update && \
@@ -7,18 +7,20 @@ RUN \
   libbz2-dev \
   ccache \
   software-properties-common && \
-  rm -rf /var/lib/apt/lists/*
-
-RUN \
   add-apt-repository ppa:deadsnakes/ppa && \
+  apt update && \
   apt install -y \
+  libdraco-dev \
   python3.11 \
   castxml && \
   rm -rf /var/lib/apt/lists/* && \
+  mkdir -p /opt/draco && \
+  mv /usr/include/draco /opt/include && \
   rm /usr/bin/python3 && \
   ln -s $(which python3.11) /usr/bin/python3 && \
   ln -s $(which python3.11) /usr/bin/python && \
-  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
+  curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
+  rm -rf /var/lib/apt/lists/*
 
 RUN \
   python3 -m pip install \
@@ -31,11 +33,13 @@ RUN \
   pytest-mock==3.14.0 \
   pygccxml==3.0.2 \
   typeguard==2.2.1 \
-  joblib==1.4.2
+  joblib==1.4.2 \
+  clang==20.1.0 \
+  ray==2.44.1
 
 ENV RAPIDJSON_VERSION=1.1.0
 ENV FREETYPE_VERSION=2-13-3
-ENV OCCT_VERSION=7_6_2
+ENV OCCT_VERSION=7_6_3
 ENV _EMCC_CCACHE=1
 ENV COMPILER_WRAPPER=ccache
 ENV CCACHE_DIR=/opencascade.js/build/ccache

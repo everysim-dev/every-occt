@@ -25,11 +25,22 @@ rmrf = local["rm"]["-rf"]
 
 
 referenceTypeTemplateDefs = """
+#ifdef CONSTRUCTOR
+#define CONSTRUCTOR_SAVED CONSTRUCTOR
+#undef CONSTRUCTOR
+#endif
+
 #include <emscripten/bind.h>
 #include <functional>
 #include <type_traits>
 #include <array>
 #include <stdexcept>
+
+// Emscripten 바인딩 사용 후 원래 매크로 복원
+#ifdef CONSTRUCTOR_SAVED
+#define CONSTRUCTOR CONSTRUCTOR_SAVED
+#undef CONSTRUCTOR_SAVED
+#endif
 
 using namespace emscripten;
 
@@ -174,26 +185,24 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepAlgoAPI_BooleanOperation": ["BOPAlgo_PaveFiller"],
         "BRepAlgoAPI_BuilderAlgo": ["BOPAlgo_PaveFiller"],
         "BRepApprox_TheImpPrmSvSurfacesOfApprox": ["IntSurf_Quadric"],
-        "BRepApprox_ParLeastSquareOfMyGradientOfTheComputeLineBezierOfApprox": [
-            "BRepApprox_TheMultiLineOfApprox"
-        ],
-        "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion"],
-        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": [
-            "AppParCurves_MultiCurve"
-        ],
+        "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion", "AdvApprox_Cutting"],
+        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": ["AppParCurves_MultiCurve"],
         "BRepExtrema_TriangleSet": ["AppParCurves_MultiCurve"],
-        "AppDef_MyBSplGradientOfBSplineCompute": ["AppDef_MultiLine"],
-        "BRepApprox_MyBSplGradientOfTheComputeLineOfApprox": [
-            "BRepApprox_TheMultiLineOfApprox"
-        ],
         "BRepMesh_GeomTool": ["BRepAdaptor_Curve"],
         "BRepBuilderAPI_MakeSolid": ["TopoDS_CompSolid"],
         "BRepBlend_AppFuncRst": ["Blend_SurfRstFunction"],
+        "BRepBlend_CSConstRad": ["Blend_Point"],
+        "AIS_Axis": ["Geom_Line", "Geom_Axis1Placement"],
+        "AIS_Plane": ["Geom_Line", "Geom_Axis2Placement", "Geom_Plane"],
+        "BRepBlend_AppFuncRstRst": ["Blend_RstRstFunction"],
+        "BRepCheck_Wire": ["TopoDS_Wire"],
+        "BRepFill_ShapeLaw": ["TopoDS_Wire"],
     }
 
     REQUIRED_HEADERS = [
         "TopoDS_Shape",
         "Adaptor2d_Curve2d",
+        "AppDef_MultiLine" , # AppDef
         "BOPDS_PaveBlock",
         "Standard_TypeDef",
         "BRepGProp_Face",
@@ -202,6 +211,7 @@ def processHeaders(decl: declarations.declaration_t):
         "Message_ProgressRange",
         "math_Matrix",  # BRep
         "BOPAlgo_PaveFiller",  # BRepAlgoAPI
+        "BRepApprox_TheMultiLineOfApprox",  # BRepApprox
     ]
     defaultHeaders = HEADERS[childName] if childName in HEADERS else []
 
@@ -370,7 +380,7 @@ def processChildren(
         if not originalName:
             continue
 
-        # if originalName != "OSD_Parallel":
+        # if originalName != "BVH_Array3f":
         #     continue
 
         processFunction = None
@@ -523,7 +533,11 @@ def parse(additionalCppCode: str = ""):
     )
 
     # include path 인자 구성 + Emscripten 전용 플래그 추가
-    args = [*includePathArgs]
+    args = [
+        "-I/emsdk/upstream/emscripten/system/include/",
+        "-I/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
+        *includePathArgs,
+    ]
     extra_flags = [
         "-D__EMSCRIPTEN__",
         "-std=c++17",

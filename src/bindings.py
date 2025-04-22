@@ -10,7 +10,6 @@ from Common import console
 from typing import Union, Optional, Dict
 from typing import Optional
 from typeguard import typechecked
-from pygccxml import declarations
 import re
 
 
@@ -235,13 +234,15 @@ class EmbindBindings(Bindings):
             b: declarations.hierarchy_info_t 
 
             if b.related_class:
+                if declarations.is_struct(b.related_class):
+                    continue
                 base = b
                 break
 
         classBinding = className
 
         if base:
-            baseBinding = make_bindings_identifier(base.related_class.decl_string)
+            baseBinding = base.related_class.decl_string
             classBinding = f"{classBinding}, base<{baseBinding}>"
 
         bindings_name = make_bindings_identifier(lastToken)
@@ -251,7 +252,6 @@ class EmbindBindings(Bindings):
             + self.processClassInner(
                 theClass, templateDecl, templateArgs, className=className
             )
-            + '\n  function("doLeakCheck", &__lsan_do_recoverable_leak_check);\n'
             + "\n  register_optional<Message_ProgressRange>();\n"
             + "}\n\n"
         )
@@ -322,10 +322,10 @@ class EmbindBindings(Bindings):
         argNameBindings = ", ".join([argToString(arg, withType=False, withName=True, onlyName=True) for arg in args])
         argBindings = ", ".join([argToString(arg, withName=True) for arg in args])
 
-        name = f"{className}_{index + 1}"
+        name = f"{make_bindings_identifier(className)}_{index + 1}"
 
         output = ""
-        output += f"  struct {name} : public {className} {{\n"
+        output += f"  struct {name}: public {className} {{\n"
         output += f"    {name}({argBindings}): {className}({argNameBindings}) {{}}\n"
         output += "  };\n"
         output += f'  class_<{name}, base<{className}>>("{name}")\n'
@@ -337,6 +337,9 @@ class EmbindBindings(Bindings):
     @typechecked
     def processConstructors(self, theClass: declarations.class_t, className: str) -> str:
         output = ""
+
+        if declarations.is_union(theClass):
+            return output
 
         constructors = []
 
@@ -427,6 +430,23 @@ class EmbindBindings(Bindings):
                 arg: declarations.argument_t
 
                 print(method.name, arg.name, arg.decl_type)
+
+        for arg in args:
+            arg: declarations.argument_t
+            argType = unwrapType(arg)
+
+            # emcc 컴파일 시 직접 생성해보기 때문에 public 하지 않을 경우 오류 발생
+            if hasattr(argType, 'parent'):
+                if isinstance(argType.parent, declarations.class_t):
+                    if argType not in argType.parent.public_members:
+                        return ""
+                    
+        if hasattr(method.return_type, "parent"):
+            returnType = unwrapType(method.return_type.parent)
+            if isinstance(returnType, declarations.class_t):
+                if returnType not in returnType.parent.public_members:
+                    return ""
+
         argsNeedingWrapper = list(map(lambda arg: needsWrapper(arg), args))
         argsNeedingCharWrapper = list(map(lambda arg: isCString(arg), args))
         returnNeedsWrapper = needsWrapper(method.return_type)

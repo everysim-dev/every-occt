@@ -139,6 +139,8 @@ def runBuild(build):
 
   emcc = local['ccache']["emcc"][
     "-lembind",
+    # "-L/usr/lib/x86_64-linux-gnu",
+    # "-ldraco",
     ("" if additionalBindCodeO is None else additionalBindCodeO),
     *bindingsO,
     *sourcesO,
@@ -155,8 +157,6 @@ def runBuild(build):
     "-sMAXIMUM_MEMORY=4GB",
     "-sALLOW_MEMORY_GROWTH=1",
     "-sUSE_FREETYPE=1",
-    "--allow-undefined",  # 정의되지 않은 심볼 무시
-    "-sERROR_ON_UNDEFINED_SYMBOLS=0",  # 정의되지 않은 심볼에 대한 오류 비활성화
     *DEBUG_OPTIONS,
     # *build["emccFlags"],
   ]

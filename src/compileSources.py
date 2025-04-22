@@ -1,7 +1,6 @@
 #!/usr/bin/python3
 
 import os
-import multiprocessing
 
 from filter.filterSourceFiles import filterSourceFile
 from filter.filterPackages import filterPackages
@@ -9,6 +8,7 @@ from plumbum import local
 from Common import buildOptions, console, tryExcept
 from joblib import delayed
 from parallelProgress import ParallelProgress
+from Common import includePathArgs
 
 from argparse import ArgumentParser
 
@@ -38,18 +38,9 @@ LIBRARY_BASE_PATH = "/opencascade.js/build/sources"
 
 SOURCE_BASE_PATH = "/occt/src/"
 
-includePaths = []
-includePaths.extend([
-  "/rapidjson/include",
-  "/freetype/include/freetype",
-  "/freetype/include",
-])
-for dirpath, dirnames, filenames in os.walk(os.path.join(SOURCE_BASE_PATH)):
-  includePaths.append(dirpath)
-
 mkdirp = local["mkdir"]["-p"]
 
-@tryExcept
+# @tryExcept
 def buildObjectFiles(file, args):
   relativeFile = file.replace(SOURCE_BASE_PATH, "")
   mkdirp(f"{LIBRARY_BASE_PATH}/{os.path.dirname(relativeFile)}")
@@ -57,7 +48,10 @@ def buildObjectFiles(file, args):
   emcc = local['ccache']["emcc"][
     *buildOptions,
     *(["-pthread", "-DHAVE_TBB"] if args["threading"] == "multi-threaded" else []),
-    *list(map(lambda x: "-I" + x, includePaths)),
+    "-I/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1",
+    "-I/emsdk/upstream/emscripten/cache/sysroot/include/compat",
+    "-I/emsdk/upstream/emscripten/cache/sysroot/include",
+    *includePathArgs,
     "-c", file,
     "-o", f"{LIBRARY_BASE_PATH}/{relativeFile}.o"
   ]
@@ -91,6 +85,8 @@ for dirpath, dirnames, filenames in os.walk(SOURCE_BASE_PATH):
   for item in filenames:
     if not filterPackages(packageOrModuleName) or not filterPackages(getModuleNameByPackageName(packageOrModuleName)):
       continue
+    if 'IGESDraw_NetworkSubfigureDef' in item:
+      print('IGESDraw_NetworkSubfigureDef')
     if filterSourceFile(f"{dirpath}/{item}"):
       filesToBuild.append(f"{dirpath}/{item}")
 
