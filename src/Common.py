@@ -42,18 +42,6 @@ additionalIncludePaths = [
 
 includePathArgs = (
     list(dict.fromkeys(map(lambda x: "-I" + x, ocIncludePaths)))
-    # + list(
-    #     map(
-    #         lambda x: "-I" + x,
-    #         [
-    #             "/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1",
-    #             "/emsdk/upstream/emscripten/cache/sysroot/include/compat",
-    #             "/emsdk/upstream/emscripten/cache/sysroot/include",
-    #             # "/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
-    #             # "/emsdk/upstream/emscripten/cache/sysroot/include/c++/v1/__type_traits/",
-    #         ],
-    #     )
-    # )
     + list(map(lambda x: "-I" + x, ocIncludePaths + additionalIncludePaths))
     + [f"-I{TMP_DIR}"]
 )
@@ -62,10 +50,12 @@ IS_DEBUG = True
 
 DEBUG_OPTIONS = [
     # 디버깅
+    "-g",
+    "-g3",
     "-gsource-map",
     "-fsanitize=address",
-    "-Os" if IS_DEBUG else "O0",
-] if IS_DEBUG else []
+    "-O0",
+] if IS_DEBUG else ["-Os"]
 
 buildOptions = [
     "-flto",

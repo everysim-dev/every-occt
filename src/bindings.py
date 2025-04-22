@@ -234,15 +234,24 @@ class EmbindBindings(Bindings):
             b: declarations.hierarchy_info_t 
 
             if b.related_class:
+                c = b.related_class
+
+                if not isinstance(c, declarations.class_t):
+                    continue
+
+                if c.parent.name == 'std' and c.name.startswith("__"):
+                    continue
+
                 if declarations.is_struct(b.related_class):
                     continue
-                base = b
+
+                base = b.related_class
                 break
 
         classBinding = className
 
         if base:
-            baseBinding = base.related_class.decl_string
+            baseBinding = base.decl_string
             classBinding = f"{classBinding}, base<{baseBinding}>"
 
         bindings_name = make_bindings_identifier(lastToken)
@@ -296,7 +305,15 @@ class EmbindBindings(Bindings):
                         return f"{arg.name}.isNull() ? nullptr : {arg.name}.as<std::string>().c_str()"
 
             if withType:
-                result = "emscripten::val" if isCString(type) else f"{arg.decl_type.decl_string}"
+                # array types (e.g. char const [N]) treat as pointer
+                if hasattr(arg.decl_type, 'decl_string') and '[' in arg.decl_type.decl_string:
+                    # array types treat as pointer: remove reference marker and strip dims
+                    base = arg.decl_type.decl_string
+                    base = re.sub(r"&", "", base)
+                    base = re.sub(r"\s*\[\d+\]", "", base).strip()
+                    result = f"{base}*"
+                else:
+                    result = "emscripten::val" if isCString(type) else f"{arg.decl_type.decl_string}"
 
             if withName:
                 result = f"{result} {arg.name}" if result else arg.name
@@ -528,10 +545,18 @@ class EmbindBindings(Bindings):
 
                 if isCString(arg):
                     if isinstance(unwrapType(arg, withBase=False), declarations.const_t):
-                        return f"{getArgName(x)}.isNull() ? nullptr : strdup({getArgName(x)}.as<std::string>().c_str())"
+                        # 삼항 연산자를 괄호로 감싸서 연산자 우선순위 문제 해결
+                        return f"({getArgName(x)}.isNull() ? nullptr : strdup({getArgName(x)}.as<std::string>().c_str()))"
                     else:
-                        return f"{getArgName(x)}.isNull() ? nullptr : {getArgName(x)}.as<std::string>().c_str()"
+                        # 삼항 연산자를 괄호로 감싸서 연산자 우선순위 문제 해결
+                        return f"({getArgName(x)}.isNull() ? nullptr : {getArgName(x)}.as<std::string>().c_str())"
 
+                # 배열 타입인 경우
+                if isinstance(arg.decl_type, declarations.array_t) or (
+                    hasattr(arg.decl_type, 'decl_string') and '[' in arg.decl_type.decl_string and ']' in arg.decl_type.decl_string
+                ):
+                    return f"toCArray({getArgName(x)}, ref_{getArgName(x)})"
+                    
                 if x[1]:
                     return f"ref_{getArgName(x)}"
                 else:
