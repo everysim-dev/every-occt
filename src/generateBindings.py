@@ -44,13 +44,27 @@ referenceTypeTemplateDefs = """
 
 using namespace emscripten;
 
+// std::array와 C 배열 간의 변환 유틸리티 함수
+template<typename T, size_t N>
+std::array<std::remove_cv_t<T>, N> toStdArray(const T (&arr)[N]) {
+  std::array<std::remove_cv_t<T>, N> result;
+  for (size_t i = 0; i < N; ++i) result[i] = arr[i];
+  return result;
+}
+
+// std::array를 C 배열로 복사
+template<typename T, size_t N>
+void toCArray(T (&dest)[N], const std::array<std::remove_cv_t<T>, N>& src) {
+  for (size_t i = 0; i < N; ++i) dest[i] = src[i];
+}
+
 // C++17 if constexpr 기반 통합 getReferenceValue/updateReferenceValue
 template<typename T>
 auto getReferenceValue(const val& v) {
   if constexpr (std::is_array_v<T>) {
-    using U = std::remove_extent_t<T>;
+    using U = std::remove_cv_t<std::remove_extent_t<T>>;
     constexpr size_t N = std::extent_v<T>;
-    std::array<U, N> arr;
+    std::array<U, N> arr{};  // 초기화 추가
     for (size_t i = 0; i < N; ++i) {
       arr[i] = v[i].template as<U>(allow_raw_pointers());
     }
@@ -79,6 +93,7 @@ auto getReferenceValue(const val& v) {
 template<typename T>
 void updateReferenceValue(val& v, const T& ref) {
   if constexpr (std::is_array_v<T>) {
+    using U = std::remove_cv_t<std::remove_extent_t<T>>;
     constexpr size_t N = std::extent_v<T>;
     val arr = v["current"];
     for (size_t i = 0; i < N; ++i) {
@@ -91,6 +106,14 @@ void updateReferenceValue(val& v, const T& ref) {
     }
   }
   // 함수 포인터인 경우 no-op
+}
+
+// 배열 참조 매개변수를 위한 헬퍼 함수
+template<typename T, size_t N>
+void copyToArrayRef(T (&dest)[N], const std::array<std::remove_cv_t<T>, N>& src) {
+  for (size_t i = 0; i < N; ++i) {
+    dest[i] = src[i];
+  }
 }
 """
 
@@ -197,6 +220,7 @@ def processHeaders(decl: declarations.declaration_t):
         "BRepBlend_AppFuncRstRst": ["Blend_RstRstFunction"],
         "BRepCheck_Wire": ["TopoDS_Wire"],
         "BRepFill_ShapeLaw": ["TopoDS_Wire"],
+        "BRepPrimAPI_MakeHalfSpace": ["TopoDS_Shell"],
     }
 
     REQUIRED_HEADERS = [
@@ -380,7 +404,7 @@ def processChildren(
         if not originalName:
             continue
 
-        # if originalName != "BVH_Array3f":
+        # if originalName != "Message_ProgressScope":
         #     continue
 
         processFunction = None
