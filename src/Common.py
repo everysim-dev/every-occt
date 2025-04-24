@@ -73,3 +73,56 @@ buildOptions = [
 ]
 
 
+
+HEADERS = {
+    "BRepFill_TrimShellCorner": ["TopoDS_Vertex"],
+    "AIS_EqualDistanceRelation": ["TopoDS_Vertex", "TopoDS_Edge"],
+    "BOPAlgo_EdgeInfo": ["BOPAlgo_WireSplitter", "TopTools_ListOfShape"],
+    "IVtkDraw": ["Graphic3d_Vec2"],
+    "IntPolyh_VectorOfType": ["IntPolyh_Edge"],
+    "NCollection_IndexedDataMap": ["Graphic3d_CLight"],
+    "NCollection_DoubleMap": ["XCAFPrs_Style"],
+    "BRepBlend_ConstThroatWithPenetrationInv": ["math_Matrix"],
+    "BRepBlend_Chamfer": ["math_Matrix"],
+    "BRepBlend_ConstThroatInv": ["math_Matrix"],
+    "BRepBlend_ConstThroatWithPenetration": ["math_Matrix"],
+    "BRepBlend_ConstRad": ["Blend_Point"],
+    "NCollection_CellFilter": ["BRepMesh_CircleInspector"],
+    "BRepBlend_CSCircular": ["Blend_Point"],
+    "TCollection_AsciiString": ["TCollection_ExtendedString"],
+    "BRepAlgoAPI_BooleanOperation": ["BOPAlgo_PaveFiller"],
+    "BRepAlgoAPI_BuilderAlgo": ["BOPAlgo_PaveFiller"],
+    "BRepApprox_TheImpPrmSvSurfacesOfApprox": ["IntSurf_Quadric"],
+    "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion", "AdvApprox_Cutting"],
+    "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": [
+        "AppParCurves_MultiCurve"
+    ],
+    "BRepExtrema_TriangleSet": ["AppParCurves_MultiCurve"],
+    "BRepMesh_GeomTool": ["BRepAdaptor_Curve"],
+    "BRepBuilderAPI_MakeSolid": ["TopoDS_CompSolid"],
+    "BRepBlend_AppFuncRst": ["Blend_SurfRstFunction"],
+    "BRepBlend_CSConstRad": ["Blend_Point"],
+    "AIS_Axis": ["Geom_Line", "Geom_Axis1Placement"],
+    "AIS_Plane": ["Geom_Line", "Geom_Axis2Placement", "Geom_Plane"],
+    "BRepBlend_AppFuncRstRst": ["Blend_RstRstFunction"],
+    "BRepCheck_Wire": ["TopoDS_Wire"],
+    "BRepFill_ShapeLaw": ["TopoDS_Wire"],
+    "BRepPrimAPI_MakeHalfSpace": ["TopoDS_Shell"],
+}
+
+REQUIRED_HEADERS = [
+    "TopoDS_Shape",
+    "Adaptor2d_Curve2d",
+    "AppDef_MultiLine",  # AppDef
+    "BOPDS_PaveBlock",
+    "Standard_TypeDef",
+    "BRepGProp_Face",
+    "BRepGProp_Domain",
+    "gp",
+    "Message_ProgressRange",
+    "math_Matrix",  # BRep
+    "BOPAlgo_PaveFiller",  # BRepAlgoAPI
+    "BRepApprox_TheMultiLineOfApprox",  # BRepApprox
+    "BRepAdaptor_Curve2d",
+    "V3d_View",
+]

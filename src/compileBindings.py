@@ -20,7 +20,7 @@ sys.path.append('/emsdk/upstream/emscripten')
 
 LIBRARY_BASE_PATH = "/opencascade.js/build/bindings"
 
-@tryExcept
+# @tryExcept
 def buildOneFile(args, item):
     return local['ccache']['emcc']([
         *buildOptions,
@@ -40,7 +40,7 @@ def compileCustomCodeBindings(args, file="myMain.h"):
                 lambda x: f"{dirpath}/{x}",
                 filter(
                     lambda x: x.endswith(".cpp")
-                    # and x.endswith('Message_ProgressScope.cpp')
+                    # and x.endswith('gce_MakeCirc.cpp')
                     and not os.path.exists(f"{dirpath}/{x}.o"),
                     filenames,
                 ),

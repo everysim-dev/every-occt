@@ -1,18 +1,24 @@
 #!/usr/bin/python3
 
 from dataclasses import dataclass
-from typing import Callable, Union
-from bindings import EmbindBindings
+import re
 import os
 from parser import is_public
-from wasmGenerator.Common import SkipException, unwrapType
-from Common import ocIncludeFiles, includePathArgs, console, HEADER_NAME, HEADER_PATH
+from wasmGenerator.Common import SkipException
+from Common import (
+    ocIncludeFiles,
+    includePathArgs,
+    console,
+    HEADER_NAME,
+    HEADER_PATH,
+    HEADERS,
+    REQUIRED_HEADERS,
+)
 from plumbum import local
-from pygccxml import parser, declarations, utils
 import os
-from joblib import Parallel, delayed
 from typeguard import typechecked
 from clang import cindex
+from filter.filterPackages import filterPackages
 
 LIBRARY_BASE_PATH = os.environ.get(
     "OCJS_BINDINGS_PATH", "/opencascade.js/build/bindings"
@@ -34,12 +40,7 @@ referenceTypeTemplateDefs = """
 #endif
 
 #include <emscripten/bind.h>
-#include <functional>
-#include <type_traits>
-#include <array>
-#include <stdexcept>
 
-// Emscripten 바인딩 사용 후 원래 매크로 복원
 #ifdef CONSTRUCTOR_SAVED
 #define CONSTRUCTOR CONSTRUCTOR_SAVED
 #undef CONSTRUCTOR_SAVED
@@ -117,598 +118,596 @@ void copyToArrayRef(T (&dest)[N], const std::array<std::remove_cv_t<T>, N>& src)
   for (size_t i = 0; i < N; ++i) {
     dest[i] = src[i];
   }
-}
-"""
+}"""
 
 cache = {}
 
 
 @typechecked
-def getClass(decl: declarations.declaration_t) -> declarations.class_t | None:
-    result = decl
-
-    while isinstance(result, declarations.typedef_t):
-        result = result.decl_type
-        if hasattr(result, "declaration"):
-            result = result.declaration
-
-    if isinstance(result, declarations.class_t):
-        return result
-
-    return None
-
-
-@typechecked
-def filterCommon(decl: declarations.declaration_t) -> bool:
-    if not decl.location:
-        return False
-
-    fileName = decl.location.file_name
-
-    if fileName.endswith(HEADER_PATH):
-        return True
-
-    if not fileName or not fileName.startswith(OCCT_SRC_PATH):
-        return False
-
-    if isinstance(decl.parent, declarations.class_t):
-        return any(map(lambda x: x is decl, decl.parent.public_members))
-
-    return True
-
-
-@typechecked
-def filterClasses(decl: declarations.declaration_t) -> bool:
-    if not isinstance(decl, declarations.class_t):
-        return False
-
-    if isinstance(decl.parent, declarations.class_t) or isinstance(
-        decl.parent, declarations.class_declaration_t
-    ):
-        return False
-
-    if decl.name.startswith("basic_fstream"):
-        return False
-
-    return True
-
-
-@typechecked
-def filterTemplates(decl: declarations.declaration_t) -> bool:
-    theClass = getClass(decl)
-
-    if theClass is None:
-        return False
-
-    return filterClasses(theClass)
-
-
-@typechecked
-def filterEnums(decl: declarations.declaration_t) -> bool:
-    return isinstance(decl, declarations.enumeration_t)
-
-
-@typechecked
-def processHeaders(decl: declarations.declaration_t):
-    [originalName, childName] = getTypeName(decl)
-
-    includeFiles = set()
-
-    HEADERS = {
-        "BRepFill_TrimShellCorner": ["TopoDS_Vertex"],
-        "AIS_EqualDistanceRelation": ["TopoDS_Vertex", "TopoDS_Edge"],
-        "BOPAlgo_EdgeInfo": ["BOPAlgo_WireSplitter", "TopTools_ListOfShape"],
-        "IVtkDraw": ["Graphic3d_Vec2"],
-        "IntPolyh_VectorOfType": ["IntPolyh_Edge"],
-        "NCollection_IndexedDataMap": ["Graphic3d_CLight"],
-        "NCollection_DoubleMap": ["XCAFPrs_Style"],
-        "BRepBlend_ConstThroatWithPenetrationInv": ["math_Matrix"],
-        "BRepBlend_Chamfer": ["math_Matrix"],
-        "BRepBlend_ConstThroatInv": ["math_Matrix"],
-        "BRepBlend_ConstThroatWithPenetration": ["math_Matrix"],
-        "BRepBlend_ConstRad": ["Blend_Point"],
-        "NCollection_CellFilter": ["BRepMesh_CircleInspector"],
-        "BRepBlend_CSCircular": ["Blend_Point"],
-        "TCollection_AsciiString": ["TCollection_ExtendedString"],
-        "BRepAlgoAPI_BooleanOperation": ["BOPAlgo_PaveFiller"],
-        "BRepAlgoAPI_BuilderAlgo": ["BOPAlgo_PaveFiller"],
-        "BRepApprox_TheImpPrmSvSurfacesOfApprox": ["IntSurf_Quadric"],
-        "AdvApp2Var_ApproxAFunc2Var": ["AdvApp2Var_Criterion", "AdvApprox_Cutting"],
-        "BRepApprox_ResConstraintOfMyGradientbisOfTheComputeLineOfApprox": ["AppParCurves_MultiCurve"],
-        "BRepExtrema_TriangleSet": ["AppParCurves_MultiCurve"],
-        "BRepMesh_GeomTool": ["BRepAdaptor_Curve"],
-        "BRepBuilderAPI_MakeSolid": ["TopoDS_CompSolid"],
-        "BRepBlend_AppFuncRst": ["Blend_SurfRstFunction"],
-        "BRepBlend_CSConstRad": ["Blend_Point"],
-        "AIS_Axis": ["Geom_Line", "Geom_Axis1Placement"],
-        "AIS_Plane": ["Geom_Line", "Geom_Axis2Placement", "Geom_Plane"],
-        "BRepBlend_AppFuncRstRst": ["Blend_RstRstFunction"],
-        "BRepCheck_Wire": ["TopoDS_Wire"],
-        "BRepFill_ShapeLaw": ["TopoDS_Wire"],
-        "BRepPrimAPI_MakeHalfSpace": ["TopoDS_Shell"],
-    }
-
-    REQUIRED_HEADERS = [
-        "TopoDS_Shape",
-        "Adaptor2d_Curve2d",
-        "AppDef_MultiLine" , # AppDef
-        "BOPDS_PaveBlock",
-        "Standard_TypeDef",
-        "BRepGProp_Face",
-        "BRepGProp_Domain",
-        "gp",
-        "Message_ProgressRange",
-        "math_Matrix",  # BRep
-        "BOPAlgo_PaveFiller",  # BRepAlgoAPI
-        "BRepApprox_TheMultiLineOfApprox",  # BRepApprox
-    ]
-    defaultHeaders = HEADERS[childName] if childName in HEADERS else []
-
-    headers = [
-        f"{header}.hxx"
-        for header in [
-            *REQUIRED_HEADERS,
-            *defaultHeaders,
-        ]
-    ]
-
-    includeFiles.update(headers)
-
-    aliases = getattr(decl, "aliases", [])
-
-    targets = [decl, *filter(lambda a: a.name not in ("base_type"), aliases)]
-
-    if isinstance(decl, declarations.class_t):
-        for method in decl.member_functions(allow_empty=True):
-            method: declarations.member_function_t
-
-            if method.access_type != "public":
-                continue
-
-            targets.append(method)
-            targets.append(method.return_type)
-
-            for argType in method.argument_types:
-                targets.append(argType)
-
-    for target in targets:
-        founds = getIncludeFiles(target)
-
-        if founds:
-            includeFiles.update(founds)
-
-    # Standard가 가장 먼저 include되고 TopoDS가 그 다음으로 include 되어야 함.
-    # 모든 정렬 기준을 순차적으로 적용
-    includeFiles = sorted(
-        includeFiles,
-        key=lambda x: (
-            not x.startswith("Standard_"),
-            not x.startswith("TopoDS_"),
-            all(map(lambda h: not x.startswith(h), REQUIRED_HEADERS)),
-            x,
-        ),
-    )
-    includeFiles.append(f"sanitizer/lsan_interface.h")
-
-    return "\n".join(
-        map(
-            lambda x: (
-                f'#include "{x}"' if x == f"{HEADER_NAME}.h" else f"#include <{x}>"
-            ),
-            includeFiles,
-        )
-    )
-
-
-@typechecked
-def processChild(
-    decl: declarations.declaration_t,
-    buildType: str,
-    extension: str,
-    processFunction: Callable[..., str],
-) -> None:
-    [originalName, childName] = getTypeName(decl)
-
-    file_path = None
-    if decl.location is not None:
-        file_path = decl.location.file_name
-
-    if file_path and file_path.startswith(OCCT_SRC_PATH):
-        relOcFileName = file_path.replace(OCCT_SRC_PATH, "")
-    elif file_path:
-        relOcFileName = os.path.basename(file_path)
-    else:
-        relOcFileName = "unknown_header"
-
-    mkdirp(f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}")
-    filename = f"{BUILD_DIRECTORY}/{buildType}/{relOcFileName}/{childName}{extension}"
-
-    includes = processHeaders(decl)
-
-    preamble = f"{includes}\n{referenceTypeTemplateDefs}"
-
-    if True or not os.path.exists(filename):
-        try:
-            output = processFunction(preamble, decl)
-            with open(filename, "w") as bindingsFile:
-                bindingsFile.write(output)
-            console.print(f"Generated {filename}")
-        except SkipException as e:
-            console.print(str(e))
-        except Exception as e:
-            console.print_exception(show_locals=False)
-            raise e
-
-
-@typechecked
-def strip_template_params(full_name: str) -> str:
-    idx = full_name.find("<")
-    return full_name[:idx] if idx != -1 else full_name
-
-
-@typechecked
-def getTypeName(
-    decl: Union[declarations.declaration_t, declarations.cpptypes.type_t],
-) -> list[str]:
-    name = ""
-
-    if hasattr(decl, "base"):
-        base = decl.base
-
-        if hasattr(base, "name"):
-            name = base.name
-        elif hasattr(base, "decl_string"):
-            name = base.decl_string
-    elif hasattr(decl, "name"):
-        name = decl.name
-    elif hasattr(decl, "decl_string"):
-        name = decl.decl_string
-
-    return [name, strip_template_params(name)]
-
-
-@typechecked
-def processChildren(
-    ns: declarations.namespace_t,
-    buildType: str,
-    extension: str,
-    # tu: cindex.TranslationUnit,
-) -> None:
-    children = (
-        list(ns.typedefs())
-        + list(ns.enumerations())
-        + list(ns.declarations)
-        + list(ns.classes())
-    )
-
-    console.print(f"Children length is {len(children)}")
-
-    for child in children:
-        [originalName, partialName] = getTypeName(child)
-
-        if originalName not in cache:
-            cache[originalName] = []
-
-        cache[originalName].append(child)
-
-    console.print(f"Completed caching")
-
-    futures = []
-    parallel = Parallel(n_jobs=-1, backend="threading")
-
-    processed = set()
-
-    for child in children:
-        [originalName, childName] = getTypeName(child)
-
-        print(f"Processing {childName}")
-
-        if not filterCommon(child):
-            continue
-
-        if childName in processed:
-            continue
-
-        if not originalName:
-            continue
-
-        # if originalName != "Message_ProgressScope":
-        #     continue
-
-        processFunction = None
-
-        if filterClasses(child):
-            processFunction = embindGenerationFuncClasses
-        elif filterTemplates(child):
-            processFunction = embindGenerationFuncTemplates
-        elif filterEnums(child):
-            processFunction = embindGenerationFuncEnums
-        else:
-            continue
-
-        processed.add(childName)
-
-        func = delayed(processChild)
-
-        futures.append(
-            func(
-                child,
-                buildType,
-                extension,
-                processFunction,
-            )
-        )
-
-    out = parallel(futures)
-
-    print(f"Processed {len(out)} children")
-
-
-@typechecked
-def getIncludeFiles(
-    decl: Union[declarations.declaration_t, declarations.cpptypes.type_t],
-) -> set | None:
-    while hasattr(decl, "base"):
-        decl = decl.base
-
-    if isinstance(decl, declarations.declarated_t):
-        decl = decl.declaration
-
-    queue = [decl]
-    result = set()
-    checked = {}
-
-    while len(queue):
-        d = queue.pop()
-
-        if isinstance(d, declarations.fundamental_t):
-            continue
-
-        [originalName, partialName] = getTypeName(d)
-
-        if originalName in checked:
-            continue
-
-        checked[originalName] = True
-
-        # FIXME
-        # founds = getattr(cache, originalName, [])
-        # print(founds, originalName, founds.__class__.__name__)
-        # queue.extend(founds)
-
-        # if declarations.templates.is_instantiation(originalName):
-        #     _, params = declarations.templates.split(originalName)
-
-        #     for param in params:
-        #         founds = getattr(cache, param, [])
-        #         queue.extend(founds)
-
-        if hasattr(d, "location"):
-            if d.location is not None:
-                fileName: str = d.location.file_name
-
-                fileName = fileName.replace(".lxx", ".hxx")
-
-                if fileName.startswith(OCCT_SRC_PATH) or fileName.endswith(HEADER_PATH):
-                    result.add(os.path.basename(fileName))
-
-    return result
-
-
-@typechecked
-def embindGenerationFuncClasses(
-    preamble: str,
-    child: declarations.class_t,
-    className: str = None,
+def applyTemplate(
+    typeName: str,
+    templateTypes: list[cindex.Type],
 ) -> str:
-    embindings = EmbindBindings()
+    if len(templateTypes):
+        templateType = templateTypes[0]
+        typeName = re.sub("<T>", f"<{templateType.spelling}>", typeName)
+        typeName = re.sub(r"type-parameter-\d-\d", templateType.spelling, typeName)
 
-    output = embindings.processClass(child, className=className)
-
-    return preamble + output
-
-
-@typechecked
-def embindGenerationFuncTemplates(
-    preamble: str,
-    child: declarations.declaration_t,
-) -> str:
-    templateClass = child
-
-    # pygccxml typedef_t 기반 템플릿 인스턴스 처리
-    templateClass = getClass(child)
-
-    if isinstance(templateClass, declarations.class_t):
-        return embindGenerationFuncClasses(
-            preamble, templateClass, className=child.decl_string
-        )
-
-    return ""
+    return typeName
 
 
 @typechecked
-def embindGenerationFuncEnums(
-    preamble: str,
-    child: declarations.enumeration_t,
-) -> str:
-    embindings = EmbindBindings()
+def get_qualified_type(
+    cursorType: cindex.Type, templateTypes: list[cindex.Type] = []
+):
+    canonical = cursorType.get_canonical()
+    pointee = cursorType.get_pointee()
+    pointee_decl = pointee.get_declaration()
 
-    output = embindings.processEnum(child)
+    names = []
+    locations = set()
 
-    return preamble + output
+    decl = pointee_decl.semantic_parent
 
+    if pointee_decl.location.file:
+        locations.add(pointee_decl.location.file.name)
 
-def get_public_methods_and_ctors(class_cursor: cindex.Cursor) -> tuple[list[str], list[str]]:
-    """
-    주어진 클래스 커서에 대해 public 메서드와 생성자 목록을 반환합니다.
-    """
-    methods:    list[C_Method] = []
-    ctors:      list[C_Constructor] = []
-    for child in class_cursor.get_children():
-        if is_public(child):
-            if child.kind == cindex.CursorKind.CXX_METHOD:
-                name = child.spelling
+    isNeedTemplate = pointee_decl.type.kind in [cindex.TypeKind.UNEXPOSED, cindex.TypeKind.ELABORATED, cindex.TypeKind.INVALID] and templateTypes
 
-                raw_args = [arg for arg in child.get_arguments()]
+    while decl is not None and decl.kind not in [
+        cindex.CursorKind.NO_DECL_FOUND,
+        cindex.CursorKind.TRANSLATION_UNIT,
+    ]:
+        if decl.spelling:
+            if decl.location.file:
+                locations.add(decl.location.file.name)
+            names.append(decl.spelling)
 
-                if any(map(lambda x: not is_public(x), raw_args)):
-                    continue
-                if not is_public(child.result_type):
-                    continue
+        if decl.kind in [cindex.CursorKind.NAMESPACE]:
+            break
 
-                if child.spelling.startswith("operator"):
-                    continue
+        decl = decl.semantic_parent
 
-                args = [C_Argument(arg.spelling, arg.type.spelling) for arg in raw_args]
-                returnType = C_Type(child.result_type.spelling)
+    result = canonical.spelling if isNeedTemplate else cursorType.spelling
+    
+    prefix = "::".join(reversed(names))
+    if prefix not in result:
+        result = result.replace(pointee_decl.spelling, f"{prefix}::{pointee_decl.spelling}")
 
-                methods.append(
-                    C_Method(name, args, returnType)
-                )
-            elif child.kind == cindex.CursorKind.CONSTRUCTOR:
-                raw_args = [arg for arg in child.get_arguments()]
-
-                if any(map(lambda x: not is_public(x), raw_args)):
-                    continue
-
-                args = [C_Argument(arg.spelling, arg.type.spelling) for arg in raw_args]
-
-                ctors.append(C_Constructor(child.spelling, args))
-    return methods, ctors
+    return applyTemplate(result, templateTypes), locations
 
 
 @dataclass
 class C_Type:
     name: str
+    locations: set[str]
+    withWrapper: bool = False
+    isPointer: bool = False
+    isVoid: bool = False
+    isCString: bool = False
+    isConst: bool = False
+
+    @property
+    def spelling(self):
+        return "emscripten::val" if self.withWrapper else self.name
+
+    @classmethod
+    def needsWrapper(cls, cursorType: cindex.Type) -> bool:
+        canonical = cursorType.get_canonical()
+
+        # LValueReference가 아니면 래핑 필요 없음
+        if canonical.kind != cindex.TypeKind.LVALUEREFERENCE:
+            return False
+        
+        # 참조 대상 타입 가져오기
+        pointee = canonical.get_pointee()
+
+        # const LValueReference는 래핑 불필요
+        if pointee.is_const_qualified():
+            return False
+        # 포인터 참조이면 래핑 필요
+        if pointee.kind == cindex.TypeKind.POINTER:
+            return True
+        # enum이면 래핑 필요
+        if pointee.kind == cindex.TypeKind.ENUM:
+            return True
+        # 기본 타입(int, float 등)은 래핑 필요
+        if pointee.kind in {
+            cindex.TypeKind.BOOL, cindex.TypeKind.CHAR_U, cindex.TypeKind.UCHAR,
+            cindex.TypeKind.CHAR16, cindex.TypeKind.CHAR32, cindex.TypeKind.USHORT,
+            cindex.TypeKind.UINT, cindex.TypeKind.ULONG, cindex.TypeKind.ULONGLONG,
+            cindex.TypeKind.SHORT, cindex.TypeKind.INT, cindex.TypeKind.LONG,
+            cindex.TypeKind.LONGLONG, cindex.TypeKind.FLOAT, cindex.TypeKind.DOUBLE,
+            cindex.TypeKind.LONGDOUBLE
+        }:
+            return True
+        return False
+
+
+    @classmethod
+    def fromCursor(
+        cls, cursor: cindex.Cursor, templateTypes: list[cindex.Type]
+    ) -> "C_Type":
+        name, locations = get_qualified_type(cursor.type, templateTypes)
+
+        return cls(
+            name=name, 
+            locations=locations, 
+            withWrapper=cls.needsWrapper(cursor.type), 
+            isPointer=cursor.type.kind == cindex.TypeKind.POINTER,
+            isVoid=cursor.type.kind == cindex.TypeKind.VOID,
+        )
+
+    @classmethod
+    def fromCursorType(
+        cls, cursorType: cindex.Type, templateTypes: list[cindex.Type]
+    ) -> "C_Type":
+        cursor = cursorType.get_declaration()
+
+        if cursor.kind is not cindex.CursorKind.NO_DECL_FOUND:
+            return cls.fromCursor(cursor, templateTypes)
+        
+        name, locations = get_qualified_type(cursorType, templateTypes)
+
+        return cls(
+            name=name, 
+            locations=locations, 
+            withWrapper=cls.needsWrapper(cursorType), 
+            isPointer=cursorType.kind == cindex.TypeKind.POINTER,
+            isVoid=cursorType.kind == cindex.TypeKind.VOID,
+        )
+
+@dataclass
+class C_ReturnType:
+    type: C_Type
+
+    @property
+    def spelling(self) -> str:
+        return self.type.spelling
+    
+    @property
+    def withWrapper(self) -> bool:
+        return self.type.withWrapper
+    
+    @property
+    def locations(self) -> set[str]:
+        return self.type.locations
+    
+    @property
+    def innerBinding(self):
+        constBinding = "const " if self.type.isConst else ""
+        pointerBinding = " &" if self.type.isPointer else ""
+
+        return f"      {constBinding}auto{pointerBinding} ret"
+    
+    @property
+    def finalBinding(self):
+        if not self.type.withWrapper:
+            return f"      return ret;"
+        if self.type.isPointer:
+            return f"      return ret == nullptr ? emscripten::val::null() : emscripten::val(static_cast<{self.type.spelling}>(ret));"
+        elif self.type.isVoid:
+            return f"      return;"
+        else:
+            return f"      return emscripten::val(ret);"
+
 
 @dataclass
 class C_Argument:
     name: str
     type: C_Type
 
+    @property
+    def locations(self):
+        return self.type.locations
+    
+    @property
+    def getBinding(self):
+        return f"      auto ref_{self.name} = getReferenceValue<{self.type.spelling}>({self.name});"
+    
+    @property
+    def updateBinding(self):
+        return f"      updateReferenceValue<{self.type.spelling}>({self.name}, ref_{self.name});"
+
+    def process(self, withName: bool = False, withType: bool = False):
+        if withType and withName:
+            return f"{self.type.spelling} {self.name}"
+        elif withType:
+            return self.type.spelling
+        elif withName:
+            return self.name
+        raise ValueError("Either withName or withType must be True")
+
+
 @dataclass
 class C_Method:
     name: str
+    isStatic: bool
     args: list[C_Argument]
-    returnType: C_Type
+    returnType: C_ReturnType
+    isConst: bool
+
+    @property
+    def withWrapper(self) -> bool:
+        return any(arg.type.withWrapper for arg in self.args) or self.returnType.withWrapper
+
+    @property
+    def locations(self) -> set[str]:
+        return {
+            loc for arg in self.args for loc in arg.locations
+        } | self.returnType.locations
+    
+    def processInner(self, className: str):
+        thatArg = C_Argument(name="that", type=C_Type(name=className, locations=set(), withWrapper=False))
+
+        args = self.args.copy()
+
+        if self.withWrapper and not self.isStatic:
+            args.insert(0, thatArg)
+
+        argNamesBinding = ", ".join([arg.process(withName=True) for arg in args])
+        argTypesBinding = ", ".join([arg.process(withType=True) for arg in args])
+        argsBinding = ", ".join([arg.process(withName=True, withType=True) for arg in args])
+        signatureBinding = f"{self.returnType.spelling}({argTypesBinding})"
+
+        if not self.withWrapper:
+            constBinding = " const" if self.isConst else ""
+
+            return f"select_overload<{signatureBinding}{constBinding}>(&{className}::{self.name})"
+
+        argGetBindings = "\n".join(
+            [arg.getBinding for arg in args if arg.type.withWrapper]
+        )
+        argUpdateBindings = "\n".join(
+            [arg.updateBinding for arg in args if arg.type.withWrapper]
+        )
+
+        prefixBinding = f"{className}::" if self.isStatic else f"that."
+
+        return f"""std::function<{signatureBinding}>([]({argsBinding}) -> {self.returnType.spelling} {{
+{argGetBindings}
+{self.returnType.innerBinding} = {prefixBinding}{self.name}({argNamesBinding});
+{argUpdateBindings}
+{self.returnType.finalBinding}
+  }}
+"""
+
+
+    def process(self, className: str):
+        functionBinding = "class_function" if self.isStatic else "function"
+
+        return f"""
+    .{functionBinding}("{self.name}", {self.processInner(className)}, allow_raw_pointers())"""
+
 
 @dataclass
 class C_Constructor:
     name: str
     args: list[C_Argument]
 
+    @property
+    def locations(self) -> set[str]:
+        return {loc for arg in self.args for loc in arg.locations}
+
+    def process(self, className: str, index: int):
+        structName = f"{className}_{index + 1}"
+        fullArgsBinding = ", ".join(
+            [arg.process(withName=True, withType=True) for arg in self.args]
+        )
+        argNamesBinding = ", ".join([arg.process(withName=True) for arg in self.args])
+        argTypesBinding = ", ".join([arg.process(withType=True) for arg in self.args])
+
+        return f"""
+  struct {structName}: public {className} {{
+    {structName}({fullArgsBinding}): {className}({argNamesBinding}) {{}}
+  }};
+  class_<{structName}, base<{className}>>("{structName}")
+    .constructor<{argTypesBinding}>();"""
+
+
 @dataclass
 class C_Class:
     name: str
+    base: str
     methods: list[C_Method]
     constructors: list[C_Constructor]
+    fileName: str
+    _locations: set[str]
+
+    @property
+    def locations(self) -> set[str]:
+        combined = (*self.methods, *self.constructors)
+        return {
+            loc for member in combined for loc in member.locations
+        } | self._locations
+
+    @property
+    def defaultHeaders(self) -> set[str]:
+        defaultHeaders = HEADERS.get(self.name, [])
+
+        headers = [
+            f"{header}.hxx"
+            for header in [
+                *REQUIRED_HEADERS,
+                *defaultHeaders,
+            ]
+        ]
+
+        return set(headers)
+
+    @property
+    def headers(self) -> str:
+        headers = [
+            os.path.basename(header)
+            for header in [
+                *self.defaultHeaders,
+                *self.locations,
+            ]
+        ]
+
+        return set(headers)
+
+    @property
+    def includes(self) -> str:
+        # Standard가 가장 먼저 include되고 TopoDS가 그 다음으로 include 되어야 함.
+        # 모든 정렬 기준을 순차적으로 적용
+        includeFiles = sorted(
+            self.headers,
+            key=lambda x: (
+                not x.startswith("Standard_"),
+                not x.startswith("TopoDS_"),
+                all(map(lambda h: not x.startswith(h), REQUIRED_HEADERS)),
+                x,
+            ),
+        )
+
+        return "\n".join(
+            map(
+                lambda x: (
+                    f'#include "{x}"' if x == f"{HEADER_NAME}.h" else f"#include <{x}>"
+                ),
+                includeFiles,
+            )
+        )
+
+    @property
+    def binding(self) -> str:
+        methodBindings = "".join(method.process(self.name) for method in self.methods)
+        constructorBindings = "".join(
+            constructor.process(self.name, index)
+            for index, constructor in enumerate(self.constructors)
+        )
+        baseBinding = f", base<{self.base}>" if self.base else ""
+
+        return f"""{self.includes}
+{referenceTypeTemplateDefs}
+        
+EMSCRIPTEN_BINDINGS({self.name}) {{
+  class_<{self.name}{baseBinding}>("{self.name}"){methodBindings};\n{constructorBindings}
+}}
+"""
+
+    def process(self):
+        if not self.fileName:
+            return
+
+        basePath = f"{LIBRARY_BASE_PATH}/{os.path.basename(self.fileName)}"
+        path = f"{basePath}/{self.name}.cpp"
+
+        if not os.path.exists(path):
+            os.makedirs(basePath, exist_ok=True)
+
+            with open(path, "w") as f:
+                f.write(self.binding)
+
+
+@dataclass
+class C_Enum:
+    name: str
+    values: list[str]
+    fileName: str
+
+    @property
+    def binding(self) -> str:
+        enumBindings = "\n".join(
+            f'    .value("{value}", {self.name}::{value})' for value in self.values
+        )
+
+        return f"""#include <gp_XY.hxx>
+#include <gp_XYZ.hxx>
+#include <{self.fileName}>
+{referenceTypeTemplateDefs}
+EMSCRIPTEN_BINDINGS({self.name}) {{
+  enum_<{self.name}>("{self.name}")
+{enumBindings};
+}}"""
+
+    def process(self):
+        if not self.fileName:
+            return
+
+        basePath = f"{LIBRARY_BASE_PATH}/{os.path.basename(self.fileName)}"
+        path = f"{basePath}/{self.name}.cpp"
+
+        if not os.path.exists(path):
+            os.makedirs(basePath, exist_ok=True)
+
+            with open(path, "w") as f:
+                f.write(self.binding)
+
 
 @typechecked
-def process(extension: str, customCode: str):    
-    cindex.Config.set_library_file(
-        "/usr/lib/x86_64-linux-gnu/libclang-20.so.1"
-    )
+def processChild(cursor: cindex.Cursor):
+    locations = set()
+    templateTypes = []
+
+    name = cursor.spelling
+
+    locations.add(cursor.location.file.name)
+
+    if cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
+        type = cursor.underlying_typedef_type
+
+        if (
+            type.kind == cindex.TypeKind.ELABORATED
+            or type.kind == cindex.TypeKind.UNEXPOSED
+        ):
+            children = cursor.get_children()
+
+            templateRefs = list(
+                filter(
+                    lambda x: x.kind == cindex.CursorKind.TEMPLATE_REF,
+                    children,
+                )
+            )
+
+            if len(templateRefs) == 1:
+                templateRef = templateRefs[0]
+
+                templateDecl = templateRef.get_definition()
+                templateTypes = [
+                    cursor.type.get_template_argument_type(index)
+                    for index in range(cursor.type.get_num_template_arguments())
+                ]
+
+                cursor = templateDecl
+
+    if not cursor or not cursor.location.file:
+        return None
+
+    fileName = cursor.location.file.name
+
+    if cursor.kind == cindex.CursorKind.ENUM_DECL:
+        if cursor.is_anonymous():
+            raise SkipException(f"Skip {fileName} because of anonymous enum")
+
+        enumValues = []
+        locations = set([fileName])
+
+        for child in cursor.get_children():
+            if child.kind != cindex.CursorKind.ENUM_CONSTANT_DECL:
+                continue
+
+            if child.location.file:
+                locations.add(child.get_definition().location.file.name)
+
+            enumValues.append(child.spelling)
+
+        theEnum = C_Enum(name, enumValues, fileName)
+        theEnum.process()
+
+        return theEnum
+
+    if (
+        cursor.kind == cindex.CursorKind.CLASS_DECL
+        or cursor.kind == cindex.CursorKind.CLASS_TEMPLATE
+    ):
+        if len(templateTypes) > 1:
+            raise SkipException(f"Skip {name} because of multiple template types")
+
+        methods, constructors = getPublicMembers(cursor, templateTypes)
+
+        base = None
+
+        for child in cursor.get_children():
+            if child.kind == cindex.CursorKind.CXX_BASE_SPECIFIER:
+                base = child.type.get_canonical().get_declaration()
+
+        if base and base.location.file:
+                locations.add(base.location.file.name)
+
+        if not cursor or not cursor.location.file:
+            return None
+
+        fileName = cursor.location.file.name
+
+        theClass = C_Class(
+            name=name,
+            base=base.spelling if base else None,
+            methods=methods, 
+            constructors=constructors, 
+            fileName=fileName,
+            _locations=locations
+        )
+
+        theClass.process()
+
+        return theClass
+    
+    return None
+
+
+@typechecked
+def getPublicMembers(
+    class_cursor: cindex.Cursor,
+    templateTypes: list[cindex.Type] = [],
+) -> tuple[list[C_Method], list[C_Constructor]]:
+    """
+    주어진 클래스 커서에 대해 public 메서드와 생성자 목록을 반환합니다.
+    """
+    methods: list[C_Method] = []
+    ctors: list[C_Constructor] = []
+
+    for child in class_cursor.get_children():
+        if not is_public(child):
+            continue
+
+        if child.kind == cindex.CursorKind.CXX_METHOD:
+            method = child
+
+            name = method.spelling
+
+            raw_args = [arg for arg in method.get_arguments()]
+
+            if any(map(lambda x: not is_public(x), raw_args)):
+                continue
+            if not is_public(method.result_type):
+                continue
+
+            if method.spelling.startswith("operator"):
+                continue
+
+            isStatic = method.is_static_method()
+
+            args = [
+                C_Argument(arg.spelling, C_Type.fromCursor(arg, templateTypes))
+                for arg in raw_args
+            ]
+
+            returnType = C_Type.fromCursorType(method.result_type, templateTypes)
+
+            if method.spelling == 'GetNumberOfIntervals':
+                print(returnType.spelling)
+
+            methods.append(
+                C_Method(name, isStatic, args, C_ReturnType(returnType), method.is_const_method())
+            )
+        elif child.kind == cindex.CursorKind.CONSTRUCTOR:
+            constructor = child
+
+            raw_args = [arg for arg in constructor.get_arguments()]
+
+            if any(map(lambda x: not is_public(x), raw_args)):
+                continue
+
+            args = [
+                C_Argument(arg.spelling, C_Type.fromCursor(arg, templateTypes))
+                for arg in raw_args
+            ]
+
+            ctors.append(C_Constructor(constructor.spelling, args))
+
+    return methods, ctors
+
+
+@typechecked
+def process(customCode: str):
+    cindex.Config.set_library_file("/usr/lib/x86_64-linux-gnu/libclang-20.so.1")
     index = cindex.Index.create()
 
     print("Index created")
 
-    translationUnit = index.parse(
-        HEADER_PATH, [
-        "-x",
-        "c++",
-        "-stdlib=libc++",
-        "-D__EMSCRIPTEN__"
-        ] + includePathArgs
-    )
-
-    classes = []
-
-    for cursor in translationUnit.cursor.get_children():
-        name = cursor.spelling
-
-        if not name.startswith("Handle_"):
-            continue
-
-        if not cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
-            print("1", cursor.spelling, cursor.kind)
-
-        if cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
-            cursor = cursor.underlying_typedef_type
-
-        if not cursor.kind == cindex.TypeKind.ELABORATED:
-            print("2", cursor.spelling, cursor.kind)
-
-        if cursor.kind == cindex.TypeKind.ELABORATED:
-            cursor = cursor.get_named_type()
-
-        if not cursor.kind == cindex.TypeKind.UNEXPOSED:
-            print("3", cursor.spelling, cursor.kind)
-
-        if cursor.kind == cindex.TypeKind.UNEXPOSED:
-            cursor = cursor.get_canonical()
-
-        if not cursor.kind == cindex.TypeKind.RECORD:
-            print("4", cursor.spelling, cursor.kind)
-
-        if cursor.kind == cindex.TypeKind.RECORD:
-            cursor = cursor.get_declaration()
-
-        if not cursor.kind == cindex.CursorKind.CLASS_DECL:
-            print("5", cursor.spelling, cursor.kind)
-
-        if not is_public(cursor):
-            continue
-
-        # print(f"Class: {name}, Cursor: {cursor.spelling}, kind: {cursor.kind}")
-
-        if cursor.kind == cindex.CursorKind.CLASS_DECL:
-            methods, constructors = get_public_methods_and_ctors(cursor)
-            theClass = C_Class(name, methods, constructors)
-            classes.append(theClass)
-            # print(f"{name}, methods: {methods}, Constructors: {constructors}")
-
-    print(f"Classes: {len(classes)}")
-
-    exit()
-
-    ns = parse(customCode)
-
-    processChildren(
-        ns,
-        "bindings",
-        extension,
-    )
-
-
-@typechecked
-def parse(additionalCppCode: str = ""):
-    """
-    CastXML + pygccxml 기반으로 헤더 파싱 및 global_namespace 반환
-    """
-    generator_path, generator_name = utils.find_xml_generator()
-
-    xml_generator_config = parser.xml_generator_configuration_t(
-        xml_generator_path=generator_path,
-        xml_generator=generator_name,
-        compiler_path="/emsdk/upstream/bin/clang++",
-        keep_xml=True,
-    )
-
-    # include path 인자 구성 + Emscripten 전용 플래그 추가
-    args = [
-        "-I/emsdk/upstream/emscripten/system/include/",
-        "-I/emsdk/upstream/emscripten/system/lib/libcxx/include/__support/newlib/",
-        *includePathArgs,
-    ]
-    extra_flags = [
-        "-D__EMSCRIPTEN__",
-        # "-std=c++17",
-    ]
-
-    xml_generator_config.cflags = " ".join(args + extra_flags)
-
-    # 가상 헤더 파일 내용 생성
-    header_content = OCCT_INCLUDE_STATEMENTS + "\n" + additionalCppCode
+    header_content = OCCT_INCLUDE_STATEMENTS + "\n" + customCode
 
     console.print("Writing header file...")
 
@@ -716,36 +715,52 @@ def parse(additionalCppCode: str = ""):
     with open(HEADER_PATH, "w") as f:
         f.write(header_content)
 
-    console.print("Parsing header file...")
-
-    file_config = parser.file_configuration_t(
-        data=HEADER_PATH, content_type=parser.CONTENT_TYPE.CACHED_SOURCE_FILE
+    translationUnit = index.parse(
+        HEADER_PATH,
+        ["-x", "c++", "-D__EMSCRIPTEN__"] + includePathArgs,
     )
 
-    project_reader = parser.project_reader_t(
-        xml_generator_config, cache=parser.directory_cache_t
-    )
+    results = []
 
-    # pygccxml 파싱 수행
-    decls = project_reader.read_files(
-        [file_config], compilation_mode=parser.COMPILATION_MODE.FILE_BY_FILE
-    )
-    global_ns = declarations.get_global_namespace(decls)
+    for cursor in translationUnit.cursor.get_children():
+        definition = cursor.get_definition()
 
-    global_ns.init_optimizer()
+        if definition and definition != cursor:
+            continue
 
-    return global_ns
+        if not definition:
+            continue
+
+        if not definition.location.file:
+            continue
+
+        if not definition.location.file.name.startswith(OCCT_SRC_PATH):
+            continue
+
+        if not filterPackages(definition.location.file.name.split("/")[-2]):
+            continue
+
+        if not is_public(cursor):
+            continue
+
+        try:
+            results.append(processChild(cursor))
+        except SkipException as e:
+            # console.print(e)
+            continue
+
+    print(f"Results: {len(list(filter(lambda x: x, results)))}")
 
 
 @typechecked
 def generateCustomCodeBindings(customCode: str):
     mkdirp(LIBRARY_BASE_PATH)
 
-    process(".cpp", customCode)
+    process(customCode)
 
 
 if __name__ == "__main__":
     rmrf(LIBRARY_BASE_PATH)
     mkdirp(LIBRARY_BASE_PATH)
 
-    process(".cpp", "")
+    process("")

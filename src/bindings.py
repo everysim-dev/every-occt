@@ -32,58 +32,6 @@ def indent(level: int):
     return " " * level * 2
 
 
-builtInTypes = [  # according to https://en.cppreference.com/w/cpp/language/types
-    # Integer types
-    "int",
-    "short",
-    "short int",
-    "signed short",
-    "signed short int",
-    "unsigned short",
-    "unsigned short int",
-    "signed",
-    "signed int",
-    "unsigned",
-    "unsigned int",
-    "long",
-    "long int",
-    "signed long",
-    "signed long int",
-    "unsigned long",
-    "unsigned long int",
-    "long long",
-    "long long int",
-    "signed long long",
-    "signed long long int",
-    "unsigned long long",
-    "unsigned long long int",
-    # Boolean type
-    "bool",
-    # Character types
-    "char",
-    "signed char",
-    "unsigned char",
-    "wchar_t",
-    "char16_t",
-    "char32_t",
-    "char8_t",
-    # Floating point types
-    "float",
-    "double",
-    "long double",
-]
-
-special_template_types = [
-    "NCollection_LocalArray",
-    "NCollection_Sequence",
-    "NCollection_List",
-    "NCollection_Vector",
-    "NCollection_Array1",
-    "NCollection_Array2",
-    "TColStd_Array1OfReal",
-]
-
-
 def isCString(type: Union[declarations.declaration_t]):
     baseType = unwrapType(type, withBase=False)
 
@@ -431,14 +379,11 @@ class EmbindBindings(Bindings):
 
             if baseType and isinstance(baseType, declarations.enumeration_t):
                 return True
-
             # 기본 타입(int, float 등)은 래핑 필요
             # 이는 값 변경이 포인터를 통해 전달되어야 하기 때문
             if isinstance(baseType, declarations.fundamental_t):
                 return True
-
             return False
-
 
         args = list(method.arguments)
         if method.name == "Center":
