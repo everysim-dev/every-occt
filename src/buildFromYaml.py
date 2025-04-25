@@ -1,8 +1,6 @@
 #!/usr/bin/python3
 
 import os
-import json
-import time
 import yaml
 from generateBindings import generateCustomCodeBindings
 from compileBindings import compileCustomCodeBindings
@@ -33,25 +31,11 @@ buildConfig = v.normalized(buildConfig)
 
 # rmrf(f"{LIBRARY_BASE_PATH}/bindings/myMain.h")
 
-# generateCustomCodeBindings(buildConfig["additionalCppCode"])
-# compileCustomCodeBindings({
-#   "threading": os.environ['threading'],
-# })
-
-def verifyBinding(binding) -> bool:
-  for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/bindings"):
-    for item in filenames:
-      if item.endswith(".cpp.o") and binding["symbol"] == item[:-6]:
-        return True
-  return False
-
-def verifyBindings(bindings) -> bool:
-  fails = []
-  for binding in bindings:
-    if not verifyBinding(binding):
-      fails.append(binding)
-  if fails:
-    raise Exception(f"Requested binding {json.dumps(fails)} does not exist!")
+generateCustomCodeBindings(buildConfig["additionalCppCode"])
+compileCustomCodeBindings({
+  "bindings": buildConfig["mainBuild"]["bindings"],
+  "threading": os.environ['threading'],
+})
 
 # verifyBindings(buildConfig["mainBuild"]["bindings"])
 # for extraBuild in buildConfig["extraBuilds"]:

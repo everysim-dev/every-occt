@@ -1,3 +1,4 @@
+import json
 import tempfile
 from filter.filterIncludeFiles import filterIncludeFile
 from rich.console import Console
@@ -126,3 +127,20 @@ REQUIRED_HEADERS = [
     "BRepAdaptor_Curve2d",
     "V3d_View",
 ]
+
+LIBRARY_BASE_PATH = "/opencascade.js/build"
+
+def verifyBinding(binding) -> bool:
+  for dirpath, dirnames, filenames in os.walk(f"{LIBRARY_BASE_PATH}/bindings"):
+    for item in filenames:
+      if item.endswith(".cpp.o") and binding["symbol"] == item[:-6]:
+        return True
+  return False
+
+def verifyBindings(bindings) -> bool:
+  fails = []
+  for binding in bindings:
+    if not verifyBinding(binding):
+      fails.append(binding)
+  if fails:
+    raise Exception(f"Requested binding {json.dumps(fails)} does not exist!")

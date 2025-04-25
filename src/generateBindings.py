@@ -126,33 +126,43 @@ cache = {}
 @typechecked
 def applyTemplate(
     typeName: str,
-    templateTypes: list[cindex.Type],
+    templateTypes: dict[str, str] = {},
 ) -> str:
-    if len(templateTypes):
-        templateType = templateTypes[0]
-        typeName = re.sub("<T>", f"<{templateType.spelling}>", typeName)
-        typeName = re.sub(r"type-parameter-\d-\d", templateType.spelling, typeName)
+    for key, value in templateTypes.items():
+        typeName = f" {typeName} ".replace(f" {key} ", f" {value} ")
+        typeName = re.sub(f"<{key}>", f"<{value}>", typeName)
+        typeName = re.sub(fr",(\s?){key},", lambda m: f",{m.group(1)}{value},", typeName)
+        typeName = re.sub(fr",(\s?){key}>", lambda m: f",{m.group(1)}{value}>", typeName)
+        typeName = re.sub(f"<{key},", f"<{value},", typeName)
 
-    return typeName
+    return typeName.strip()
 
 
 @typechecked
-def get_qualified_type(
-    cursorType: cindex.Type, templateTypes: list[cindex.Type] = []
-):
-    canonical = cursorType.get_canonical()
+def get_qualified_type(cursorType: cindex.Type, templateTypes: dict[str, str] = {}, replaces: dict[str, str] = {}):
     pointee = cursorType.get_pointee()
     pointee_decl = pointee.get_declaration()
 
     names = []
     locations = set()
 
+    if pointee_decl.kind == cindex.CursorKind.NO_DECL_FOUND:
+        pointee_decl = cursorType.get_declaration()
+
     decl = pointee_decl.semantic_parent
 
     if pointee_decl.location.file:
         locations.add(pointee_decl.location.file.name)
 
-    isNeedTemplate = pointee_decl.type.kind in [cindex.TypeKind.UNEXPOSED, cindex.TypeKind.ELABORATED, cindex.TypeKind.INVALID] and templateTypes
+    isNeedTemplate = (
+        pointee_decl.type.kind
+        in [
+            cindex.TypeKind.UNEXPOSED,
+            cindex.TypeKind.ELABORATED,
+            cindex.TypeKind.INVALID,
+        ]
+        and templateTypes
+    )
 
     while decl is not None and decl.kind not in [
         cindex.CursorKind.NO_DECL_FOUND,
@@ -161,6 +171,7 @@ def get_qualified_type(
         if decl.spelling:
             if decl.location.file:
                 locations.add(decl.location.file.name)
+
             names.append(decl.spelling)
 
         if decl.kind in [cindex.CursorKind.NAMESPACE]:
@@ -168,15 +179,41 @@ def get_qualified_type(
 
         decl = decl.semantic_parent
 
-    result = canonical.spelling if isNeedTemplate else cursorType.spelling
-    
+    result = cursorType.spelling
+
     prefix = "::".join(reversed(names))
     if prefix not in result:
-        result = result.replace(pointee_decl.spelling, f"{prefix}::{pointee_decl.spelling}")
+        result = result.replace(
+            pointee_decl.spelling, f"{prefix}::{pointee_decl.spelling}"
+        )
 
-    return applyTemplate(result, templateTypes), locations
+    result = applyTemplate(result, templateTypes) if isNeedTemplate else result
+
+    for key, value in replaces.items():
+        result = result.replace(key, value)
+
+    return result, locations
 
 
+def getIsPrivateCopyConstructor(cursor: cindex.Cursor | None) -> bool:
+    if cursor:
+        if cursor.kind in [
+            cindex.CursorKind.CLASS_DECL,
+            cindex.CursorKind.CLASS_TEMPLATE,
+            cindex.CursorKind.STRUCT_DECL,
+        ]:
+            for child in cursor.get_children():
+                if child.is_copy_constructor() and child.access_specifier != cindex.AccessSpecifier.PUBLIC:
+                    return True
+                
+                if child.kind == cindex.CursorKind.FIELD_DECL:
+                    field_type = child.type
+                    field_type_decl = field_type.get_declaration()
+                    if getIsPrivateCopyConstructor(field_type_decl):
+                        return True
+
+    return False
+        
 @dataclass
 class C_Type:
     name: str
@@ -186,6 +223,7 @@ class C_Type:
     isVoid: bool = False
     isCString: bool = False
     isConst: bool = False
+    isPrivateCopyConstructor: bool = False
 
     @property
     def spelling(self):
@@ -198,7 +236,7 @@ class C_Type:
         # LValueReference가 아니면 래핑 필요 없음
         if canonical.kind != cindex.TypeKind.LVALUEREFERENCE:
             return False
-        
+
         # 참조 대상 타입 가져오기
         pointee = canonical.get_pointee()
 
@@ -213,49 +251,55 @@ class C_Type:
             return True
         # 기본 타입(int, float 등)은 래핑 필요
         if pointee.kind in {
-            cindex.TypeKind.BOOL, cindex.TypeKind.CHAR_U, cindex.TypeKind.UCHAR,
-            cindex.TypeKind.CHAR16, cindex.TypeKind.CHAR32, cindex.TypeKind.USHORT,
-            cindex.TypeKind.UINT, cindex.TypeKind.ULONG, cindex.TypeKind.ULONGLONG,
-            cindex.TypeKind.SHORT, cindex.TypeKind.INT, cindex.TypeKind.LONG,
-            cindex.TypeKind.LONGLONG, cindex.TypeKind.FLOAT, cindex.TypeKind.DOUBLE,
-            cindex.TypeKind.LONGDOUBLE
+            cindex.TypeKind.BOOL,
+            cindex.TypeKind.CHAR_U,
+            cindex.TypeKind.UCHAR,
+            cindex.TypeKind.CHAR16,
+            cindex.TypeKind.CHAR32,
+            cindex.TypeKind.USHORT,
+            cindex.TypeKind.UINT,
+            cindex.TypeKind.ULONG,
+            cindex.TypeKind.ULONGLONG,
+            cindex.TypeKind.SHORT,
+            cindex.TypeKind.INT,
+            cindex.TypeKind.LONG,
+            cindex.TypeKind.LONGLONG,
+            cindex.TypeKind.FLOAT,
+            cindex.TypeKind.DOUBLE,
+            cindex.TypeKind.LONGDOUBLE,
         }:
             return True
         return False
 
-
     @classmethod
     def fromCursor(
-        cls, cursor: cindex.Cursor, templateTypes: list[cindex.Type]
+        cls, cursor: cindex.Cursor, templateTypes: dict[str, str], replaces: dict[str, str]
     ) -> "C_Type":
-        name, locations = get_qualified_type(cursor.type, templateTypes)
-
-        return cls(
-            name=name, 
-            locations=locations, 
-            withWrapper=cls.needsWrapper(cursor.type), 
-            isPointer=cursor.type.kind == cindex.TypeKind.POINTER,
-            isVoid=cursor.type.kind == cindex.TypeKind.VOID,
-        )
+        return cls.fromCursorType(cursor.type, templateTypes, replaces)
 
     @classmethod
     def fromCursorType(
-        cls, cursorType: cindex.Type, templateTypes: list[cindex.Type]
+        cls, cursorType: cindex.Type, templateTypes: dict[str, str], replaces: dict[str, str]
     ) -> "C_Type":
-        cursor = cursorType.get_declaration()
+        name, locations = get_qualified_type(cursorType, templateTypes, replaces)
 
-        if cursor.kind is not cindex.CursorKind.NO_DECL_FOUND:
-            return cls.fromCursor(cursor, templateTypes)
-        
-        name, locations = get_qualified_type(cursorType, templateTypes)
+        decl = cursorType.get_pointee().get_declaration()
+        if decl.kind == cindex.CursorKind.NO_DECL_FOUND:
+            decl = cursorType.get_declaration()
+        if decl.kind == cindex.CursorKind.TYPEDEF_DECL:
+            decl = decl.get_definition()
+
+        isPrivateCopyConstructor = getIsPrivateCopyConstructor(decl)
 
         return cls(
-            name=name, 
-            locations=locations, 
-            withWrapper=cls.needsWrapper(cursorType), 
+            name=name,
+            locations=locations,
+            withWrapper=cls.needsWrapper(cursorType),
             isPointer=cursorType.kind == cindex.TypeKind.POINTER,
+            isPrivateCopyConstructor=isPrivateCopyConstructor,
             isVoid=cursorType.kind == cindex.TypeKind.VOID,
         )
+
 
 @dataclass
 class C_ReturnType:
@@ -263,33 +307,47 @@ class C_ReturnType:
 
     @property
     def spelling(self) -> str:
+
+        # 참조 반환 타입이 private 복사 생성자를 가지면 포인터로 변환
+        if self.type.isPrivateCopyConstructor:
+            name = self.type.name.replace("&", "*").replace("const ", "")
+
+            if 'const' not in name:
+                name = "const " + name
+
+            return name
+
         return self.type.spelling
-    
+
     @property
     def withWrapper(self) -> bool:
-        return self.type.withWrapper
-    
+        return self.type.withWrapper or self.type.isPrivateCopyConstructor
+
     @property
     def locations(self) -> set[str]:
         return self.type.locations
-    
+
     @property
     def innerBinding(self):
+        if self.type.isVoid:
+            return "      "
+
         constBinding = "const " if self.type.isConst else ""
         pointerBinding = " &" if self.type.isPointer else ""
+        rightPointerBinding = "&" if self.type.isPrivateCopyConstructor else ""
 
-        return f"      {constBinding}auto{pointerBinding} ret"
-    
+        return f"      {constBinding}auto{pointerBinding} ret = {rightPointerBinding}"
+
     @property
     def finalBinding(self):
+        if self.type.isVoid:
+            return f""
         if not self.type.withWrapper:
-            return f"      return ret;"
+            return f"\n      return ret;"
         if self.type.isPointer:
-            return f"      return ret == nullptr ? emscripten::val::null() : emscripten::val(static_cast<{self.type.spelling}>(ret));"
-        elif self.type.isVoid:
-            return f"      return;"
-        else:
-            return f"      return emscripten::val(ret);"
+            return f"\n      return ret == nullptr ? emscripten::val::null() : emscripten::val(static_cast<{self.type.spelling}>(ret));"
+        
+        return f"\n      return emscripten::val(ret);"
 
 
 @dataclass
@@ -300,28 +358,34 @@ class C_Argument:
     @property
     def locations(self):
         return self.type.locations
-    
+
     @property
     def getBinding(self):
-        return f"      auto ref_{self.name} = getReferenceValue<{self.type.spelling}>({self.name});"
-    
+        return f"      auto ref_{self.name} = getReferenceValue<{self.type.name.replace(' &', '')}>({self.name});"
+
     @property
     def updateBinding(self):
-        return f"      updateReferenceValue<{self.type.spelling}>({self.name}, ref_{self.name});"
+        return f"      updateReferenceValue<{self.type.name.replace(' &', '')}>({self.name}, ref_{self.name});"
 
-    def process(self, withName: bool = False, withType: bool = False):
+    def process(self, withName: bool = False, withType: bool = False, withRef: bool = False):
+        prefix = ""
+
+        if withRef and self.type.withWrapper:
+            prefix = "ref_"
+
         if withType and withName:
-            return f"{self.type.spelling} {self.name}"
+            return f"{self.type.spelling} {prefix}{self.name}"
         elif withType:
             return self.type.spelling
         elif withName:
-            return self.name
+            return f"{prefix}{self.name}"
         raise ValueError("Either withName or withType must be True")
 
 
 @dataclass
 class C_Method:
     name: str
+    suffix: str
     isStatic: bool
     args: list[C_Argument]
     returnType: C_ReturnType
@@ -329,31 +393,42 @@ class C_Method:
 
     @property
     def withWrapper(self) -> bool:
-        return any(arg.type.withWrapper for arg in self.args) or self.returnType.withWrapper
+        return (
+            any(arg.type.withWrapper for arg in self.args)
+            or self.returnType.withWrapper
+        )
 
     @property
     def locations(self) -> set[str]:
         return {
             loc for arg in self.args for loc in arg.locations
         } | self.returnType.locations
-    
+
     def processInner(self, className: str):
-        thatArg = C_Argument(name="that", type=C_Type(name=className, locations=set(), withWrapper=False))
+        thatType = C_Type(name=f"{className}&", locations=set(),isConst=True, withWrapper=False)
+        thatArg = C_Argument(
+            name="that", type=thatType
+        )
 
         args = self.args.copy()
 
-        if self.withWrapper and not self.isStatic:
+        withThat = self.withWrapper and not self.isStatic
+
+        if withThat:
             args.insert(0, thatArg)
 
-        argNamesBinding = ", ".join([arg.process(withName=True) for arg in args])
+        argNamesBinding = ", ".join([arg.process(withName=True, withRef=True) for arg in (args[1:] if withThat else args)])
         argTypesBinding = ", ".join([arg.process(withType=True) for arg in args])
-        argsBinding = ", ".join([arg.process(withName=True, withType=True) for arg in args])
+        argsBinding = ", ".join(
+            [arg.process(withName=True, withType=True) for arg in args]
+        )
         signatureBinding = f"{self.returnType.spelling}({argTypesBinding})"
 
         if not self.withWrapper:
             constBinding = " const" if self.isConst else ""
+            classBinding = "" if self.isStatic else f", {className}"
 
-            return f"select_overload<{signatureBinding}{constBinding}>(&{className}::{self.name})"
+            return f"select_overload<{signatureBinding}{constBinding}{classBinding}>(&{className}::{self.name})"
 
         argGetBindings = "\n".join(
             [arg.getBinding for arg in args if arg.type.withWrapper]
@@ -364,20 +439,17 @@ class C_Method:
 
         prefixBinding = f"{className}::" if self.isStatic else f"that."
 
-        return f"""std::function<{signatureBinding}>([]({argsBinding}) -> {self.returnType.spelling} {{
+        return f"""+[]({argsBinding}) -> {self.returnType.spelling} {{
 {argGetBindings}
-{self.returnType.innerBinding} = {prefixBinding}{self.name}({argNamesBinding});
-{argUpdateBindings}
-{self.returnType.finalBinding}
-  }}
-"""
-
+{self.returnType.innerBinding}{prefixBinding}{self.name}({argNamesBinding});
+{argUpdateBindings}{self.returnType.finalBinding}
+    }}""".replace("\n\n", "\n")
 
     def process(self, className: str):
         functionBinding = "class_function" if self.isStatic else "function"
 
         return f"""
-    .{functionBinding}("{self.name}", {self.processInner(className)}, allow_raw_pointers())"""
+    .{functionBinding}("{self.name}{self.suffix}", {self.processInner(className)}, allow_raw_pointers())"""
 
 
 @dataclass
@@ -412,6 +484,8 @@ class C_Class:
     methods: list[C_Method]
     constructors: list[C_Constructor]
     fileName: str
+    isAbstract: bool
+    isPrivateDestructor: bool
     _locations: set[str]
 
     @property
@@ -441,9 +515,11 @@ class C_Class:
             os.path.basename(header)
             for header in [
                 *self.defaultHeaders,
-                *self.locations,
+                *(location for location in self.locations if location == '/tmp/myMain.h' or (location.startswith(OCCT_SRC_PATH) and location.endswith(".hxx"))),
             ]
         ]
+        if 'myMain.h' in headers:
+            print(headers)
 
         return set(headers)
 
@@ -473,25 +549,35 @@ class C_Class:
     @property
     def binding(self) -> str:
         methodBindings = "".join(method.process(self.name) for method in self.methods)
-        constructorBindings = "".join(
-            constructor.process(self.name, index)
-            for index, constructor in enumerate(self.constructors)
-        )
+        constructorBindings = ""
+        destructorBindings = ""
+
+        if self.isPrivateDestructor:
+            destructorBindings = f"""
+namespace emscripten {{ namespace internal {{ template<> void raw_destructor<{self.name}>({self.name}* ptr) {{ /* do nothing */ }} }} }}
+"""
+
+        if not self.isAbstract:
+            constructorBindings = "\n" + "".join(
+                constructor.process(self.name, index)
+                for index, constructor in enumerate(self.constructors)
+            )
         baseBinding = f", base<{self.base}>" if self.base else ""
 
         return f"""{self.includes}
 {referenceTypeTemplateDefs}
         
 EMSCRIPTEN_BINDINGS({self.name}) {{
-  class_<{self.name}{baseBinding}>("{self.name}"){methodBindings};\n{constructorBindings}
+  class_<{self.name}{baseBinding}>("{self.name}"){methodBindings};{constructorBindings}
 }}
+{destructorBindings}
 """
 
     def process(self):
         if not self.fileName:
             return
 
-        basePath = f"{LIBRARY_BASE_PATH}/{os.path.basename(self.fileName)}"
+        basePath = f"{LIBRARY_BASE_PATH}/{self.fileName.replace(OCCT_SRC_PATH, '').replace('/tmp', '')}"
         path = f"{basePath}/{self.name}.cpp"
 
         if not os.path.exists(path):
@@ -526,7 +612,7 @@ EMSCRIPTEN_BINDINGS({self.name}) {{
         if not self.fileName:
             return
 
-        basePath = f"{LIBRARY_BASE_PATH}/{os.path.basename(self.fileName)}"
+        basePath = f"{LIBRARY_BASE_PATH}/{self.fileName.replace(OCCT_SRC_PATH, '')}"
         path = f"{basePath}/{self.name}.cpp"
 
         if not os.path.exists(path):
@@ -536,14 +622,26 @@ EMSCRIPTEN_BINDINGS({self.name}) {{
                 f.write(self.binding)
 
 
+LITERAL_TYPES = [
+    cindex.CursorKind.INTEGER_LITERAL,
+    cindex.CursorKind.FLOATING_LITERAL,
+    cindex.CursorKind.STRING_LITERAL,
+    cindex.CursorKind.CHARACTER_LITERAL
+]
+
 @typechecked
 def processChild(cursor: cindex.Cursor):
     locations = set()
-    templateTypes = []
+    templateTypes = {}
 
     name = cursor.spelling
 
     locations.add(cursor.location.file.name)
+
+    fileName = cursor.get_definition().location.file.name
+
+    if 'BitByBitDev' in name:
+        print('fooooooo', name, cursor.kind, cursor.spelling, fileName)
 
     if cursor.kind == cindex.CursorKind.TYPEDEF_DECL:
         type = cursor.underlying_typedef_type
@@ -552,7 +650,7 @@ def processChild(cursor: cindex.Cursor):
             type.kind == cindex.TypeKind.ELABORATED
             or type.kind == cindex.TypeKind.UNEXPOSED
         ):
-            children = cursor.get_children()
+            children = list(cursor.get_children())
 
             templateRefs = list(
                 filter(
@@ -565,18 +663,51 @@ def processChild(cursor: cindex.Cursor):
                 templateRef = templateRefs[0]
 
                 templateDecl = templateRef.get_definition()
-                templateTypes = [
-                    cursor.type.get_template_argument_type(index)
+                
+                templateArgs = []
+                templateArgTypes = []
+
+                for child in templateDecl.get_children():
+                    if child.kind in [
+                        cindex.CursorKind.TEMPLATE_TYPE_PARAMETER,
+                        cindex.CursorKind.TEMPLATE_NON_TYPE_PARAMETER,
+                        cindex.CursorKind.TEMPLATE_TEMPLATE_PARAMETER
+                    ]:
+                        templateArgTypes.append(child.spelling)
+
+                for child in cursor.get_children():
+                    if child.kind in [cindex.CursorKind.TEMPLATE_REF, cindex.CursorKind.NAMESPACE_REF]:
+                        continue
+
+                    if name == 'Select3D_BVHBuilder3d':
+                        print(name, child.kind, child.spelling)
+
+                    if child.kind in LITERAL_TYPES:
+                        templateArgs += [token.spelling for token in child.get_tokens()]
+                    else:
+                        templateArgs.append(child.type.spelling or child.spelling)
+
+                    if len(templateArgs) == len(templateArgTypes):
+                        break
+
+                # if name == "BOPTools_Box2dTreeSelector":
+                #     print(cursor.type.get_num_template_arguments(), templateRef.type.get_num_template_arguments(), templateDecl.type.get_num_template_arguments())
+                #     print(cursor.spelling, cursor.kind, templateRef.spelling, templateRef.kind, templateDecl.spelling, templateDecl.kind)
+                templateArgs = [
+                    cursor.type.get_template_argument_type(index).spelling or templateArgs[index]
                     for index in range(cursor.type.get_num_template_arguments())
                 ]
+
+                templateTypes = dict(zip(templateArgTypes, templateArgs))
+
+                if name == 'Select3D_BVHBuilder3d':
+                    print(name, templateArgs, templateArgTypes, templateTypes)
 
                 cursor = templateDecl
 
     if not cursor or not cursor.location.file:
         return None
-
-    fileName = cursor.location.file.name
-
+    
     if cursor.kind == cindex.CursorKind.ENUM_DECL:
         if cursor.is_anonymous():
             raise SkipException(f"Skip {fileName} because of anonymous enum")
@@ -597,50 +728,59 @@ def processChild(cursor: cindex.Cursor):
         theEnum.process()
 
         return theEnum
+    
+    replaces = {
+        cursor.spelling: name
+    }
 
     if (
         cursor.kind == cindex.CursorKind.CLASS_DECL
         or cursor.kind == cindex.CursorKind.CLASS_TEMPLATE
     ):
-        if len(templateTypes) > 1:
-            raise SkipException(f"Skip {name} because of multiple template types")
-
-        methods, constructors = getPublicMembers(cursor, templateTypes)
+        methods, constructors = getPublicMembers(cursor, templateTypes, replaces)
 
         base = None
+        isPrivateDestructor = False
 
         for child in cursor.get_children():
-            if child.kind == cindex.CursorKind.CXX_BASE_SPECIFIER:
-                base = child.type.get_canonical().get_declaration()
+            if child.kind == cindex.CursorKind.DESTRUCTOR:
+                if child.access_specifier != cindex.AccessSpecifier.PUBLIC:
+                    isPrivateDestructor = True
 
+            if child.kind == cindex.CursorKind.CXX_BASE_SPECIFIER:
+                base = child
+                
         if base and base.location.file:
-                locations.add(base.location.file.name)
+            locations.add(base.location.file.name)
 
         if not cursor or not cursor.location.file:
             return None
 
-        fileName = cursor.location.file.name
+        locations.add(cursor.location.file.name)
 
         theClass = C_Class(
             name=name,
-            base=base.spelling if base else None,
-            methods=methods, 
-            constructors=constructors, 
+            base=applyTemplate(base.spelling, templateTypes) if base else None,
+            methods=methods,
+            constructors=constructors,
+            isAbstract=cursor.is_abstract_record(),
             fileName=fileName,
-            _locations=locations
+            isPrivateDestructor=isPrivateDestructor,
+            _locations=locations,
         )
 
         theClass.process()
 
         return theClass
-    
+
     return None
 
 
 @typechecked
 def getPublicMembers(
     class_cursor: cindex.Cursor,
-    templateTypes: list[cindex.Type] = [],
+    templateTypes: dict[str, str],
+    replaces: dict[str, str]
 ) -> tuple[list[C_Method], list[C_Constructor]]:
     """
     주어진 클래스 커서에 대해 public 메서드와 생성자 목록을 반환합니다.
@@ -648,12 +788,17 @@ def getPublicMembers(
     methods: list[C_Method] = []
     ctors: list[C_Constructor] = []
 
+    memo = {}
+
     for child in class_cursor.get_children():
         if not is_public(child):
             continue
 
         if child.kind == cindex.CursorKind.CXX_METHOD:
             method = child
+
+            if method.is_pure_virtual_method():
+                continue
 
             name = method.spelling
 
@@ -669,18 +814,30 @@ def getPublicMembers(
 
             isStatic = method.is_static_method()
 
+
             args = [
-                C_Argument(arg.spelling, C_Type.fromCursor(arg, templateTypes))
-                for arg in raw_args
+                C_Argument(arg.spelling if arg.spelling else f"arg{idx}", C_Type.fromCursor(arg, templateTypes, replaces))
+                for idx, arg in enumerate(raw_args)
             ]
 
-            returnType = C_Type.fromCursorType(method.result_type, templateTypes)
+            returnType = C_Type.fromCursorType(method.result_type, templateTypes, replaces)
 
-            if method.spelling == 'GetNumberOfIntervals':
-                print(returnType.spelling)
+            if name not in memo:
+                memo[name] = 0
+            else:
+                memo[name] += 1
+
+            suffix = f"_{memo[name]}" if memo[name] > 0 else ""
 
             methods.append(
-                C_Method(name, isStatic, args, C_ReturnType(returnType), method.is_const_method())
+                C_Method(
+                    name=name,
+                    suffix=suffix,
+                    isStatic=isStatic,
+                    args=args,
+                    returnType=C_ReturnType(returnType),
+                    isConst=method.is_const_method(),
+                )
             )
         elif child.kind == cindex.CursorKind.CONSTRUCTOR:
             constructor = child
@@ -691,7 +848,7 @@ def getPublicMembers(
                 continue
 
             args = [
-                C_Argument(arg.spelling, C_Type.fromCursor(arg, templateTypes))
+                C_Argument(arg.spelling, C_Type.fromCursor(arg, templateTypes, replaces))
                 for arg in raw_args
             ]
 
@@ -734,7 +891,7 @@ def process(customCode: str):
         if not definition.location.file:
             continue
 
-        if not definition.location.file.name.startswith(OCCT_SRC_PATH):
+        if definition.location.file.name != "/tmp/myMain.h" and not definition.location.file.name.startswith(OCCT_SRC_PATH):
             continue
 
         if not filterPackages(definition.location.file.name.split("/")[-2]):

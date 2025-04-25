@@ -32,15 +32,24 @@ def buildOneFile(args, item):
         f"{item}.o",
     ])
 
+def foo(x, bindings):
+    print(x)
+
+    return os.path.basename(x).replace(".hxx", "") in bindings
+
 def compileCustomCodeBindings(args, file="myMain.h"):
     filesToBuild = []
+    bindings = [binding['symbol'] for binding in args['bindings']] if "bindings" in args else []
+
+    print(f"{LIBRARY_BASE_PATH}/{file}")
     for dirpath, _, filenames in os.walk(f"{LIBRARY_BASE_PATH}/{file}"):
         filesToBuild.extend(
             map(
                 lambda x: f"{dirpath}/{x}",
                 filter(
                     lambda x: x.endswith(".cpp")
-                    # and x.endswith('gce_MakeCirc.cpp')
+                    and foo(x, bindings)
+                    # and x.endswith('BOPTools_Box2dTreeSelector.cpp')
                     and not os.path.exists(f"{dirpath}/{x}.o"),
                     filenames,
                 ),
